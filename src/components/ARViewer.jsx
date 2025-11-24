@@ -1,0 +1,451 @@
+import { useEffect, useRef, useState } from 'react';
+import '@google/model-viewer';
+import './ARViewer.css';
+
+const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
+  const modelViewerRef = useRef(null);
+  const [scale, setScale] = useState(1);
+  const [rotationY, setRotationY] = useState(0);
+  const [isARSupported, setIsARSupported] = useState(true);
+  const [modelLoaded, setModelLoaded] = useState(false);
+  const [error, setError] = useState(null);
+  const [modelInfo, setModelInfo] = useState(null);
+  const [debugMessages, setDebugMessages] = useState([]);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+
+  const addDebugMessage = (message, type = 'info') => {
+    const timestamp = new Date().toLocaleTimeString();
+    const newMessage = { id: Date.now(), message, type, timestamp };
+    setDebugMessages(prev => [...prev.slice(-4), newMessage]); // Keep last 5 messages
+    
+    // Auto-remove after 5 seconds for info messages
+    if (type === 'info') {
+      setTimeout(() => {
+        setDebugMessages(prev => prev.filter(m => m.id !== newMessage.id));
+      }, 5000);
+    }
+  };
+
+  useEffect(() => {
+    const modelViewer = modelViewerRef.current;
+    
+    if (modelViewer) {
+      // Reset states on new model
+      setModelLoaded(false);
+      setError(null);
+      setModelInfo(null);
+      setLoadingProgress(0);
+      setDebugMessages([]);
+      
+      // Detect device and browser
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+      const isChrome = /CriOS/.test(navigator.userAgent);
+      const isFirefox = /FxiOS/.test(navigator.userAgent);
+      const isEdge = /EdgiOS/.test(navigator.userAgent);
+      const userAgent = navigator.userAgent;
+      
+      // Safari detection: iOS device + NOT Chrome/Firefox/Edge
+      const isSafari = isIOS && !isChrome && !isFirefox && !isEdge;
+      
+      let browserName = 'Unknown';
+      if (isSafari) {
+        browserName = 'Safari ✅';
+      } else if (isChrome) {
+        browserName = 'Chrome (AR not supported)';
+      } else if (isFirefox) {
+        browserName = 'Firefox (AR not supported)';
+      } else if (isEdge) {
+        browserName = 'Edge (AR not supported)';
+      } else {
+        browserName = 'Other';
+      }
+      
+      addDebugMessage(`Device: ${isIOS ? 'iOS' : 'Android/Desktop'}`, 'info');
+      addDebugMessage(`Browser: ${browserName}`, isSafari ? 'success' : 'warning');
+      addDebugMessage(`UA: ${userAgent.substring(0, 50)}...`, 'info');
+      
+      if (isIOS && !isSafari) {
+        addDebugMessage('🚨 MUST use Safari for iOS AR!', 'error');
+        addDebugMessage('Copy URL and open in Safari app', 'warning');
+      }
+      
+      addDebugMessage('Starting to load model...', 'info');
+      
+      console.log('User Agent:', userAgent);
+      console.log('Model Source:', modelSrc);
+
+      // Check AR support
+      const checkARSupport = async () => {
+        try {
+          const arSupported = await modelViewer.canActivateAR;
+          setIsARSupported(arSupported);
+          console.log('AR Supported:', arSupported);
+          console.log('Is Safari:', isSafari);
+          console.log('User Agent:', userAgent);
+          
+          if (!arSupported && isIOS && !isSafari) {
+            addDebugMessage('⚠️ iOS AR requires Safari browser', 'warning');
+          } else if (!arSupported && isIOS && isSafari) {
+            addDebugMessage('⚠️ AR Quick Look is DISABLED', 'error');
+            addDebugMessage('📱 Fix: Settings > Safari > Advanced', 'warning');
+            addDebugMessage('Enable "AR Quick Look for Websites"', 'warning');
+            addDebugMessage('Then restart Safari and reload', 'info');
+          } else {
+            addDebugMessage(`AR Support: ${arSupported ? '✅ Yes' : '❌ No'}`, arSupported ? 'success' : 'warning');
+          }
+        } catch (err) {
+          console.error('AR check error:', err);
+          addDebugMessage(`❌ AR check failed: ${err.message}`, 'error');
+        }
+      };
+      
+      checkARSupport();
+
+      // Model load event
+      const handleLoad = () => {
+        setModelLoaded(true);
+        setError(null);
+        setLoadingProgress(100);
+        console.log('✅ Model loaded successfully');
+        addDebugMessage('✅ Model loaded successfully!', 'success');
+        
+        // Get model info
+        const model = modelViewer.model;
+        if (model) {
+          const info = {
+            size: model.size,
+            hasAnimations: modelViewer.availableAnimations?.length > 0
+          };
+          setModelInfo(info);
+          addDebugMessage(`Animations: ${info.hasAnimations ? 'Yes' : 'None'}`, 'info');
+        }
+      };
+
+      // Error event
+      const handleError = (event) => {
+        console.error('❌ Model error:', event);
+        console.error('Error detail:', event.detail);
+        console.error('Model source:', modelSrc);
+        
+        let errorMsg = 'Failed to load model';
+        let debugInfo = [];
+        
+        if (event.detail?.type === 'loadfailed') {
+          errorMsg = 'Model load failed';
+          debugInfo.push('File format issue or corruption');
+          
+          // Check if it's a blob URL (uploaded file)
+          if (modelSrc.startsWith('blob:')) {
+            debugInfo.push('Uploaded file - may be corrupted');
+            debugInfo.push('Try: Re-upload or use different file');
+          }
+          
+          // Check for iOS network issues
+          if (isIOS && modelSrc.startsWith('http')) {
+            debugInfo.push('iOS: External URL blocked by network');
+            debugInfo.push('Try: Upload file directly from device');
+          }
+        } else if (event.detail?.message) {
+          errorMsg = event.detail.message;
+        }
+        
+        // Check if it's a CORS issue
+        if (modelSrc && modelSrc.startsWith('http') && !modelSrc.startsWith('https://raw.githubusercontent.com') && !modelSrc.startsWith('blob:')) {
+          debugInfo.push('⚠️ External URL - might need CORS');
+        }
+        
+        // iOS-specific checks
+        if (isIOS && isSafari) {
+          debugInfo.push('iOS Safari: Try uploading from Files app');
+        } else if (isIOS && !isSafari) {
+          debugInfo.push('🚨 Must use Safari browser on iOS!');
+        }
+        
+        setError(errorMsg);
+        setModelLoaded(false);
+        addDebugMessage(`❌ Error: ${errorMsg}`, 'error');
+        debugInfo.forEach(info => addDebugMessage(info, 'warning'));
+        
+        // Add recommendation to try upload instead
+        setTimeout(() => {
+          addDebugMessage('💡 Try: Upload a GLB file from your device', 'info');
+        }, 1000);
+      };
+
+      // Progress event
+      const handleProgress = (event) => {
+        const progress = event.detail.totalProgress;
+        const percent = Math.round(progress * 100);
+        setLoadingProgress(percent);
+        console.log(`Loading: ${percent}%`);
+        
+        if (percent % 25 === 0 && percent > 0 && percent < 100) {
+          addDebugMessage(`Loading: ${percent}%`, 'info');
+        }
+      };
+
+      // AR status events
+      const handleARStatus = (event) => {
+        const status = event.detail.status;
+        console.log('AR Status:', status);
+        
+        if (status === 'session-started') {
+          addDebugMessage('🎯 AR session started!', 'success');
+        } else if (status === 'not-presenting') {
+          addDebugMessage('AR session ended', 'info');
+        } else if (status === 'failed') {
+          const errorMsg = 'AR failed. Model may be too large or incompatible.';
+          setError(errorMsg);
+          addDebugMessage(`❌ ${errorMsg}`, 'error');
+          
+          if (isIOS) {
+            addDebugMessage('iOS: Try smaller model (<10MB)', 'warning');
+          }
+        }
+      };
+
+      modelViewer.addEventListener('load', handleLoad);
+      modelViewer.addEventListener('error', handleError);
+      modelViewer.addEventListener('progress', handleProgress);
+      modelViewer.addEventListener('ar-status', handleARStatus);
+
+      return () => {
+        modelViewer.removeEventListener('load', handleLoad);
+        modelViewer.removeEventListener('error', handleError);
+        modelViewer.removeEventListener('progress', handleProgress);
+        modelViewer.removeEventListener('ar-status', handleARStatus);
+      };
+    }
+  }, [modelSrc]);
+
+  // Update scale
+  useEffect(() => {
+    const modelViewer = modelViewerRef.current;
+    if (modelViewer && modelLoaded) {
+      modelViewer.scale = `${scale} ${scale} ${scale}`;
+    }
+  }, [scale, modelLoaded]);
+
+  // Update rotation
+  useEffect(() => {
+    const modelViewer = modelViewerRef.current;
+    if (modelViewer && modelLoaded) {
+      modelViewer.orientation = `0deg ${rotationY}deg 0deg`;
+    }
+  }, [rotationY, modelLoaded]);
+
+  const handleScaleChange = (newScale) => {
+    setScale(Math.max(0.1, Math.min(5, newScale)));
+  };
+
+  const handleRotationChange = (newRotation) => {
+    setRotationY(newRotation);
+  };
+
+  const resetView = () => {
+    setScale(1);
+    setRotationY(0);
+    const modelViewer = modelViewerRef.current;
+    if (modelViewer) {
+      modelViewer.resetTurntableRotation();
+    }
+  };
+
+  if (!modelSrc) {
+    return (
+      <div className="ar-viewer-empty">
+        <div className="empty-state">
+          <svg 
+            width="120" 
+            height="120" 
+            viewBox="0 0 24 24" 
+            fill="none" 
+            stroke="currentColor" 
+            strokeWidth="1.5"
+          >
+            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+            <path d="M2 17l10 5 10-5" />
+            <path d="M2 12l10 5 10-5" />
+          </svg>
+          <h3>No Model Loaded</h3>
+          <p>Upload or select a 3D model to view it in AR</p>
+          
+          {/* iOS Browser Warning */}
+          {/iPad|iPhone|iPod/.test(navigator.userAgent) && !/^((?!chrome|android).)*safari/i.test(navigator.userAgent) && (
+            <div className="ios-warning">
+              <p>⚠️ <strong>iOS Users:</strong> You must use Safari browser for AR features.</p>
+              <p>Copy this URL and open in Safari app.</p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="ar-viewer-container">
+      <model-viewer
+        ref={modelViewerRef}
+        src={modelSrc}
+        alt="3D Model"
+        ar
+        ar-modes="webxr scene-viewer quick-look"
+        camera-controls
+        touch-action="pan-y"
+        shadow-intensity="1"
+        exposure="1"
+        environment-image="neutral"
+        auto-rotate
+        camera-orbit="0deg 75deg 105%"
+        min-camera-orbit="auto auto 5%"
+        max-camera-orbit="auto auto 500%"
+        interpolation-decay="200"
+        ar-scale="auto"
+        ios-src=""
+        class="model-viewer"
+      >
+        {/* AR Button */}
+        <button 
+          slot="ar-button" 
+          className="ar-button"
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="white">
+            <path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0-5C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z"/>
+          </svg>
+          View in AR
+        </button>
+
+        {/* Loading Indicator */}
+        <div className="loading-indicator" slot="poster">
+          <div className="spinner"></div>
+          <p>Loading 3D Model...</p>
+        </div>
+
+        {/* Error Message */}
+        <div className="error-message" slot="error">
+          <p>❌ Failed to load model</p>
+          <p>Please check:</p>
+          <ul>
+            <li>File format is GLB or GLTF</li>
+            <li>File size is under 50MB</li>
+            <li>URL is accessible (if loading from URL)</li>
+          </ul>
+        </div>
+      </model-viewer>
+
+      {/* Error Toast */}
+      {error && (
+        <div className="error-toast">
+          <span>⚠️</span>
+          <p>{error}</p>
+          <button onClick={() => setError(null)}>✕</button>
+        </div>
+      )}
+
+      {/* Model Info */}
+      {modelLoaded && modelInfo && (
+        <div className="model-info">
+          <p>✅ Model loaded</p>
+          {modelInfo.hasAnimations && <p>🎬 Has animations</p>}
+        </div>
+      )}
+
+
+
+      {/* Controls Overlay */}
+      {showControls && modelLoaded && (
+        <div className="controls-overlay">
+          <button 
+            className="close-controls-btn"
+            onClick={onToggleControls}
+            aria-label="Close controls"
+          >
+            ✕
+          </button>
+          <div className="control-group">
+            <label>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M15 3l2.3 2.3-2.89 2.87 1.42 1.42L18.7 6.7 21 9V3h-6zM3 9l2.3-2.3 2.87 2.89 1.42-1.42L6.7 5.3 9 3H3v6zm6 12l-2.3-2.3 2.89-2.87-1.42-1.42L5.3 17.3 3 15v6h6zm12-6l-2.3 2.3-2.87-2.89-1.42 1.42 2.89 2.87L15 21h6v-6z"/>
+              </svg>
+              Scale: {scale.toFixed(2)}x
+            </label>
+            <div className="slider-container">
+              <button 
+                onClick={() => handleScaleChange(scale - 0.1)}
+                className="slider-btn"
+              >
+                -
+              </button>
+              <input
+                type="range"
+                min="0.1"
+                max="5"
+                step="0.1"
+                value={scale}
+                onChange={(e) => handleScaleChange(parseFloat(e.target.value))}
+                className="slider"
+              />
+              <button 
+                onClick={() => handleScaleChange(scale + 0.1)}
+                className="slider-btn"
+              >
+                +
+              </button>
+            </div>
+          </div>
+
+          <div className="control-group">
+            <label>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-5-9h10v2H7z"/>
+              </svg>
+              Rotation: {rotationY}°
+            </label>
+            <div className="slider-container">
+              <button 
+                onClick={() => handleRotationChange(rotationY - 15)}
+                className="slider-btn"
+              >
+                ↺
+              </button>
+              <input
+                type="range"
+                min="0"
+                max="360"
+                step="15"
+                value={rotationY}
+                onChange={(e) => handleRotationChange(parseInt(e.target.value))}
+                className="slider"
+              />
+              <button 
+                onClick={() => handleRotationChange(rotationY + 15)}
+                className="slider-btn"
+              >
+                ↻
+              </button>
+            </div>
+          </div>
+
+          <button onClick={resetView} className="reset-btn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
+            </svg>
+            Reset View
+          </button>
+        </div>
+      )}
+
+      {/* Instructions */}
+      <div className="instructions">
+        <h4>How to use:</h4>
+        <ul>
+          <li><strong>Desktop:</strong> Click and drag to rotate • Scroll to zoom • Right-click to pan</li>
+          <li><strong>Mobile:</strong> Tap "View in AR" to place model in your space</li>
+          <li><strong>AR Mode:</strong> Scan floor/wall/ceiling and tap to place • Pinch to scale • Rotate with two fingers</li>
+        </ul>
+      </div>
+    </div>
+  );
+};
+
+export default ARViewer;

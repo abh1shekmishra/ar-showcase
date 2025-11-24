@@ -1,0 +1,134 @@
+.model-uploader {
+  padding: 2rem;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.model-uploader h2 {
+  text-align: center;
+  margin-bottom: 2rem;
+  color: #333;
+  font-size: 1.8rem;
+}
+
+.drop-zone {
+  border: 3px dashed #ccc;
+  border-radius: 12px;
+  padding: 3rem 2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  background: #f9f9f9;
+}
+
+.drop-zone:hover {
+  border-color: #646cff;
+  background: #f0f0ff;
+}
+
+.drop-zone.dragging {
+  border-color: #646cff;
+  background: #e8ebff;
+  transform: scale(1.02);
+}
+
+.drop-zone svg {
+  color: #646cff;
+  margin-bottom: 1rem;
+}
+
+.drop-zone p {
+  margin: 0.5rem 0;
+  color: #333;
+  font-size: 1.1rem;
+}
+
+.drop-zone .file-types {
+  font-size: 0.9rem;
+  color: #666;
+}
+
+.divider {
+  text-align: center;
+  margin: 2rem 0;
+  position: relative;
+}
+
+.divider::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: #ddd;
+}
+
+.divider span {
+  background: white;
+  padding: 0 1rem;
+  position: relative;
+  color: #999;
+  font-size: 0.9rem;
+}
+
+.url-form {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.url-input {
+  flex: 1;
+  padding: 0.75rem 1rem;
+  border: 2px solid #ddd;
+  border-radius: 8px;
+  font-size: 1rem;
+  transition: border-color 0.3s;
+}
+
+.url-input:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.load-url-btn,
+.sample-btn {
+  padding: 0.75rem 1.5rem;
+  background: #646cff;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.3s;
+  font-weight: 500;
+}
+
+.load-url-btn:hover,
+.sample-btn:hover {
+  background: #535bf2;
+}
+
+.sample-btn {
+  width: 100%;
+  background: #42b983;
+}
+
+.sample-btn:hover {
+  background: #3aa876;
+}
+
+.current-model {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: #d4edda;
+  border: 1px solid #c3e6cb;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.current-model p {
+  margin: 0;
+  color: #155724;
+  font-weight: 500;
+}
