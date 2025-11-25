@@ -7,29 +7,41 @@ const ModelUploader = ({ onModelLoad }) => {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef(null);
 
-  const handleFileUpload = (file) => {
-    if (file && (file.name.endsWith('.glb') || file.name.endsWith('.gltf'))) {
-      // Check file size (warn if > 50MB)
-      const fileSizeMB = file.size / (1024 * 1024);
-      console.log(`📦 Model size: ${fileSizeMB.toFixed(2)}MB`);
-      console.log(`📦 Model name: ${file.name}`);
-      console.log(`📦 Model type: ${file.type}`);
-      
-      if (fileSizeMB > 50) {
-        alert(`⚠️ Warning: Large file (${fileSizeMB.toFixed(1)}MB). AR may not work on mobile devices. Recommended: < 10MB`);
-      } else if (fileSizeMB > 10) {
-        console.warn(`⚠️ File size ${fileSizeMB.toFixed(1)}MB may cause issues on some devices`);
-      }
-      
-      // Create blob URL with proper MIME type
+  const handleFileUpload = async (file) => {
+    if (!file) return;
+
+    const fileName = file.name.toLowerCase();
+    const isGLB = fileName.endsWith('.glb');
+    const isGLTF = fileName.endsWith('.gltf');
+
+    if (!isGLB && !isGLTF) {
+      alert('Please upload a GLB or GLTF file.\n\nFor other formats (FBX, OBJ, etc.), use an online converter:\n• https://products.aspose.app/3d/conversion/fbx-to-glb\n• https://anyconv.com/');
+      return;
+    }
+
+    // Check file size
+    const fileSizeMB = file.size / (1024 * 1024);
+    console.log(`📦 Model size: ${fileSizeMB.toFixed(2)}MB`);
+    console.log(`📦 Model name: ${file.name}`);
+    console.log(`📦 Model type: ${file.type}`);
+    
+    if (fileSizeMB > 50) {
+      alert(`⚠️ Warning: Large file (${fileSizeMB.toFixed(1)}MB). AR may not work on mobile devices. Recommended: < 10MB`);
+    } else if (fileSizeMB > 10) {
+      console.warn(`⚠️ File size ${fileSizeMB.toFixed(1)}MB may cause issues on some devices`);
+    }
+
+    try {
       const blob = new Blob([file], { type: 'model/gltf-binary' });
       const url = URL.createObjectURL(blob);
+
       setModelUrl(url);
-      onModelLoad(url);
+      onModelLoad(url, file.name);
       console.log('✅ Model file loaded:', file.name);
       console.log('✅ Blob URL:', url);
-    } else {
-      alert('Please upload a valid GLB or GLTF file');
+    } catch (error) {
+      console.error('❌ Error loading model:', error);
+      alert('Failed to load model. Please try a different file.');
     }
   };
 
@@ -48,8 +60,9 @@ const ModelUploader = ({ onModelLoad }) => {
       // Basic URL validation
       try {
         new URL(urlInput);
+        const fileName = urlInput.split('/').pop() || 'URL Model';
         setModelUrl(urlInput);
-        onModelLoad(urlInput);
+        onModelLoad(urlInput, fileName);
       } catch (err) {
         alert('Invalid URL. Please enter a valid URL to a GLB or GLTF file.');
       }
@@ -80,7 +93,7 @@ const ModelUploader = ({ onModelLoad }) => {
     // Using a smaller, more reliable sample model
     const sampleUrl = 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/Duck/glTF-Binary/Duck.glb';
     setModelUrl(sampleUrl);
-    onModelLoad(sampleUrl);
+    onModelLoad(sampleUrl, 'Duck.glb');
     console.log('Loading sample model:', sampleUrl);
   };
 
@@ -108,7 +121,10 @@ const ModelUploader = ({ onModelLoad }) => {
           <line x1="12" y1="3" x2="12" y2="15" />
         </svg>
         <p>Drag & Drop 3D Model Here</p>
-        <p className="file-types">or click to browse (GLB, GLTF)</p>
+        <p className="file-types">or click to browse (GLB, GLTF only)</p>
+        <p className="file-types" style={{ fontSize: '0.75rem', marginTop: '0.5rem', color: '#999' }}>
+          Need to convert? Use <a href="https://products.aspose.app/3d/conversion/fbx-to-glb" target="_blank" rel="noopener noreferrer" style={{ color: '#1a1a1a', textDecoration: 'underline' }}>online converter</a>
+        </p>
       </div>
 
       <input

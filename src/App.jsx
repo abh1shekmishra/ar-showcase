@@ -6,9 +6,29 @@ import './App.css'
 function App() {
   const [modelSrc, setModelSrc] = useState(null)
   const [showControls, setShowControls] = useState(true)
+  const [modelLibrary, setModelLibrary] = useState([])
 
-  const handleModelLoad = (url) => {
+  const handleModelLoad = (url, name = 'Model') => {
+    const newModel = {
+      id: Date.now(),
+      url,
+      name,
+      timestamp: new Date().toISOString()
+    }
+    setModelLibrary(prev => [...prev, newModel])
     setModelSrc(url)
+  }
+
+  const handleSelectModel = (model) => {
+    setModelSrc(model.url)
+  }
+
+  const handleDeleteModel = (id) => {
+    setModelLibrary(prev => prev.filter(m => m.id !== id))
+    if (modelLibrary.find(m => m.id === id)?.url === modelSrc) {
+      const remaining = modelLibrary.filter(m => m.id !== id)
+      setModelSrc(remaining.length > 0 ? remaining[0].url : null)
+    }
   }
 
   return (
@@ -47,6 +67,40 @@ function App() {
                   Show Controls
                 </label>
               </div>
+              
+              {/* Model Library */}
+              {modelLibrary.length > 1 && (
+                <div className="model-library">
+                  <h3>Loaded Models ({modelLibrary.length})</h3>
+                  <div className="model-list">
+                    {modelLibrary.map(model => (
+                      <div 
+                        key={model.id} 
+                        className={`model-item ${model.url === modelSrc ? 'active' : ''}`}
+                        onClick={() => handleSelectModel(model)}
+                      >
+                        <div className="model-item-info">
+                          <span className="model-name">{model.name}</span>
+                          <span className="model-time">
+                            {new Date(model.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        <button 
+                          className="delete-model-btn"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            handleDeleteModel(model.id)
+                          }}
+                          aria-label="Delete model"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <ARViewer 
                 modelSrc={modelSrc} 
                 showControls={showControls}

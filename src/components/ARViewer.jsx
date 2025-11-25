@@ -12,6 +12,8 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
   const [modelInfo, setModelInfo] = useState(null);
   const [debugMessages, setDebugMessages] = useState([]);
   const [loadingProgress, setLoadingProgress] = useState(0);
+  const [showInstructions, setShowInstructions] = useState(true);
+  const [isInAR, setIsInAR] = useState(false);
 
   const addDebugMessage = (message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -119,6 +121,11 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
           setModelInfo(info);
           addDebugMessage(`Animations: ${info.hasAnimations ? 'Yes' : 'None'}`, 'info');
         }
+
+        // Hide model info after 5 seconds
+        setTimeout(() => {
+          setModelInfo(null);
+        }, 5000);
       };
 
       // Error event
@@ -191,12 +198,15 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         
         if (status === 'session-started') {
           addDebugMessage('🎯 AR session started!', 'success');
+          setIsInAR(true);
         } else if (status === 'not-presenting') {
           addDebugMessage('AR session ended', 'info');
+          setIsInAR(false);
         } else if (status === 'failed') {
           const errorMsg = 'AR failed. Model may be too large or incompatible.';
           setError(errorMsg);
           addDebugMessage(`❌ ${errorMsg}`, 'error');
+          setIsInAR(false);
           
           if (isIOS) {
             addDebugMessage('iOS: Try smaller model (<10MB)', 'warning');
@@ -290,6 +300,7 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         alt="3D Model"
         ar
         ar-modes="webxr scene-viewer quick-look"
+        ar-placement="floor wall"
         camera-controls
         touch-action="pan-y"
         shadow-intensity="1"
@@ -300,8 +311,10 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         min-camera-orbit="auto auto 5%"
         max-camera-orbit="auto auto 500%"
         interpolation-decay="200"
-        ar-scale="auto"
+        ar-scale="fixed"
         ios-src=""
+        xr-environment
+        disable-tap
         class="model-viewer"
       >
         {/* AR Button */}
@@ -314,6 +327,25 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
           </svg>
           View in AR
         </button>
+
+        {/* AR Prompt - Custom overlay for AR instructions */}
+        <div id="ar-prompt" slot="ar-prompt">
+          <div className="ar-prompt-content">
+            <div className="scanning-indicator">
+              <div className="scan-line"></div>
+              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+                <rect x="3" y="3" width="7" height="7" />
+                <rect x="14" y="3" width="7" height="7" />
+                <rect x="3" y="14" width="7" height="7" />
+                <rect x="14" y="14" width="7" height="7" />
+              </svg>
+            </div>
+            <h3>Starting AR...</h3>
+            <p>Point your camera at a flat surface</p>
+            <p className="ar-tip">The model will appear - tap to place it where you want</p>
+            <p className="ar-note">Move slowly for better surface detection</p>
+          </div>
+        </div>
 
         {/* Loading Indicator */}
         <div className="loading-indicator" slot="poster">
@@ -436,14 +468,23 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
       )}
 
       {/* Instructions */}
-      <div className="instructions">
-        <h4>How to use:</h4>
-        <ul>
-          <li><strong>Desktop:</strong> Click and drag to rotate • Scroll to zoom • Right-click to pan</li>
-          <li><strong>Mobile:</strong> Tap "View in AR" to place model in your space</li>
-          <li><strong>AR Mode:</strong> Scan floor/wall/ceiling and tap to place • Pinch to scale • Rotate with two fingers</li>
-        </ul>
-      </div>
+      {showInstructions && (
+        <div className="instructions">
+          <button 
+            className="close-instructions-btn"
+            onClick={() => setShowInstructions(false)}
+            aria-label="Close instructions"
+          >
+            ✕
+          </button>
+          <h4>How to use:</h4>
+          <ul>
+            <li><strong>Desktop:</strong> Click and drag to rotate • Scroll to zoom • Right-click to pan</li>
+            <li><strong>Mobile:</strong> Tap "View in AR" to place model in your space</li>
+            <li><strong>AR Mode:</strong> Scan floor/wall/ceiling and tap to place • Pinch to scale • Rotate with two fingers</li>
+          </ul>
+        </div>
+      )}
     </div>
   );
 };
