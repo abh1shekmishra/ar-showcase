@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import ModelUploader from './components/ModelUploader'
+import ModelGallery from './components/ModelGallery'
 import ARViewer from './components/ARViewer'
 import './App.css'
 
@@ -15,7 +16,7 @@ function App() {
       name,
       timestamp: new Date().toISOString()
     }
-    setModelLibrary(prev => [...prev, newModel])
+    setModelLibrary(prev => [...prev, newModel])  
     setModelSrc(url)
   }
 
@@ -40,7 +41,7 @@ function App() {
             <path d="M2 17l10 5 10-5" />
             <path d="M2 12l10 5 10-5" />
           </svg>
-          AR Showcase
+          ARise
         </h1>
         <p className="subtitle">Universal Web-Based AR Viewer for iOS & Android</p>
       </header>
@@ -48,7 +49,10 @@ function App() {
       <main className="app-main">
         <div className="app-container">
           {!modelSrc ? (
-            <ModelUploader onModelLoad={handleModelLoad} />
+            <>
+              <ModelUploader onModelLoad={handleModelLoad} />
+              <ModelGallery onSelect={handleModelLoad} />
+            </>
           ) : (
             <div className="viewer-section">
               <div className="viewer-header">
@@ -58,14 +62,16 @@ function App() {
                 >
                   ← Load Different Model
                 </button>
-                <label className="toggle-controls">
-                  <input
-                    type="checkbox"
-                    checked={showControls}
-                    onChange={(e) => setShowControls(e.target.checked)}
-                  />
-                  Show Controls
-                </label>
+                <div className="viewer-header-controls">
+                  <label className="toggle-controls">
+                    <input
+                      type="checkbox"
+                      checked={showControls}
+                      onChange={(e) => setShowControls(e.target.checked)}
+                    />
+                    Show Controls
+                  </label>
+                </div>
               </div>
               
               {/* Model Library */}

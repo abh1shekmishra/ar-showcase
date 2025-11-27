@@ -44,6 +44,35 @@
   font-size: 0.9rem;
 }
 
+.environment-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  justify-content: space-between;
+}
+
+.env-btn:hover {
+  background: rgba(255,255,255,0.25) !important;
+  transform: translateY(-1px);
+}
+
+.env-btn.active {
+  box-shadow: 0 3px 10px rgba(255,255,255,0.3);
+}
+
+@media (max-width: 768px) {
+  .environment-selector {
+    gap: 4px;
+  }
+  
+  .env-btn {
+    font-size: 11px !important;
+    padding: 8px 6px !important;
+    min-width: 60px !important;
+  }
+}
+
 .ios-warning {
   margin-top: 1.5rem;
   padding: 1rem;
@@ -783,11 +812,23 @@
   }
 
   .controls-overlay {
+    position: fixed;
     top: auto;
-    bottom: 280px;
-    right: 10px;
-    left: 10px;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    max-width: 100%;
     min-width: auto;
+    border-radius: 16px 16px 0 0;
+    padding: 1.25rem;
+    max-height: 50vh;
+    overflow-y: auto;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.15);
+  }
+  
+  .close-controls-btn {
+    top: 0.5rem;
+    right: 0.5rem;
   }
 
   .instructions {
@@ -814,7 +855,7 @@
 
   .controls-overlay {
     padding: 1rem;
-    min-width: auto;
+    max-height: 60vh;
   }
 
   .instructions {

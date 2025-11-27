@@ -91,6 +91,18 @@ body {
   gap: 1rem;
 }
 
+.viewer-header-controls {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 768px) {
+  .viewer-header-controls {
+    width: 100%;
+  }
+}
+
 /* Model Library */
 .model-library {
   background: #ffffff;

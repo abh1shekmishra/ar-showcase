@@ -14,6 +14,23 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [showInstructions, setShowInstructions] = useState(true);
   const [isInAR, setIsInAR] = useState(false);
+  const [environment, setEnvironment] = useState('neutral');
+  const [exposure, setExposure] = useState(1);
+  const [skyboxImage, setSkyboxImage] = useState('');
+
+  const environments = [
+    { value: 'neutral', label: '⬜ Blank', exposure: 1, skybox: '' },
+    { value: 'legacy', label: '☀️ Outdoor', exposure: 1.2, skybox: 'https://modelviewer.dev/shared-assets/environments/aircraft_workshop_01_1k.hdr' },
+    { value: 'neutral', label: '🌅 Sunset', exposure: 0.9, skybox: 'https://modelviewer.dev/shared-assets/environments/spruit_sunrise_1k_HDR.hdr' },
+    { value: 'legacy', label: '🌃 Night', exposure: 0.6, skybox: 'https://modelviewer.dev/shared-assets/environments/moon_1k.hdr' },
+    { value: 'neutral', label: '🏭 Studio', exposure: 1.1, skybox: 'https://modelviewer.dev/shared-assets/environments/pillars_1k.hdr' },
+  ];
+
+  const handleEnvironmentChange = (env) => {
+    setEnvironment(env.value);
+    setExposure(env.exposure);
+    setSkyboxImage(env.skybox);
+  };
 
   const addDebugMessage = (message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -304,14 +321,15 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         camera-controls
         touch-action="pan-y"
         shadow-intensity="1"
-        exposure="1"
-        environment-image="neutral"
+        exposure={exposure}
+        environment-image={environment}
+        skybox-image={skyboxImage}
         auto-rotate
         camera-orbit="0deg 75deg 105%"
         min-camera-orbit="auto auto 5%"
         max-camera-orbit="auto auto 500%"
         interpolation-decay="200"
-        ar-scale="fixed"
+        ar-scale="auto"
         ios-src=""
         xr-environment
         disable-tap
@@ -458,6 +476,41 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
             </div>
           </div>
 
+          <div className="control-group">
+            <label>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c2.76 0 5-2.24 5-5 0-4.42-4.03-8-9-8zm-5.5 9c-.83 0-1.5-.67-1.5-1.5S5.67 9 6.5 9 8 9.67 8 10.5 7.33 12 6.5 12zm3-4C8.67 8 8 7.33 8 6.5S8.67 5 9.5 5s1.5.67 1.5 1.5S10.33 8 9.5 8zm5 0c-.83 0-1.5-.67-1.5-1.5S13.67 5 14.5 5s1.5.67 1.5 1.5S15.33 8 14.5 8zm3 4c-.83 0-1.5-.67-1.5-1.5S16.67 9 17.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>
+              </svg>
+              Environment
+            </label>
+            <div className="environment-selector">
+              {environments.map((env, idx) => (
+                <button
+                  key={`${env.value}-${idx}`}
+                  onClick={() => handleEnvironmentChange(env)}
+                  className={`env-btn ${environment === env.value && exposure === env.exposure ? 'active' : ''}`}
+                  style={{
+                    padding: '10px 8px',
+                    margin: '4px',
+                    background: (environment === env.value && exposure === env.exposure) ? '#ffffff' : 'rgba(255,255,255,0.1)',
+                    color: (environment === env.value && exposure === env.exposure) ? '#000' : '#fff',
+                    border: '1px solid rgba(255,255,255,0.3)',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                    fontWeight: '600',
+                    transition: 'all 0.2s ease',
+                    flex: '1 1 45%',
+                    minWidth: '70px',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {env.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <button onClick={resetView} className="reset-btn">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
@@ -481,7 +534,17 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
           <ul>
             <li><strong>Desktop:</strong> Click and drag to rotate • Scroll to zoom • Right-click to pan</li>
             <li><strong>Mobile:</strong> Tap "View in AR" to place model in your space</li>
-            <li><strong>AR Mode:</strong> Scan floor/wall/ceiling and tap to place • Pinch to scale • Rotate with two fingers</li>
+            <li><strong>AR Controls:</strong></li>
+            <ul style={{ marginLeft: '20px', marginTop: '5px' }}>
+              <li>1 finger drag = Move model</li>
+              <li>2 fingers rotate = Rotate model</li>
+              <li>2 fingers pinch = Scale model up/down</li>
+            </ul>
+            <li><strong>AR Screenshot:</strong></li>
+            <ul style={{ marginLeft: '20px', marginTop: '5px' }}>
+              <li>Android: Look for camera/share button in Scene Viewer</li>
+              <li>iOS: Press Side Button + Volume Up (device screenshot)</li>
+            </ul>
           </ul>
         </div>
       )}
