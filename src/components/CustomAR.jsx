@@ -43,10 +43,8 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const reticleHasFirstPose = useRef(false);
   const lastFrameTime = useRef(0);
 
-  // Outlier rejection buffer
+  // Outlier rejection buffer size
   const HIT_BUFFER_SIZE = 5;
-  const hitPosBuffer = useRef([]);
-  const hitQuatBuffer = useRef([]);
 
   // Tracking
   const lastHitTime = useRef(0);
@@ -57,8 +55,9 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const touchStartAngle = useRef(0);
   const touchStartScale = useRef(1);
   const touchStartRot = useRef(0);
+  const singleTouchStartX = useRef(0);
   const singleTouchStartY = useRef(0);
-  const singleTouchStartHeight = useRef(0);
+  const isDraggingModel = useRef(false);
   const activeTouches = useRef(0);
   const touchCaptureRef = useRef(null);
 
@@ -72,6 +71,16 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const _tmpQuat = useRef(new THREE.Quaternion());
   const _tmpScale = useRef(new THREE.Vector3());
   const _tmpUp = useRef(new THREE.Vector3());
+
+  // Pre-allocated hit buffer entries (avoid per-frame cloning)
+  const _hitBufPos = useRef(Array.from({ length: 5 }, () => new THREE.Vector3()));
+  const _hitBufQuat = useRef(Array.from({ length: 5 }, () => new THREE.Quaternion()));
+  const _hitBufIdx = useRef(0);
+  const _hitBufCount = useRef(0);
+  const _filteredPos = useRef(new THREE.Vector3());
+  const _medXArr = useRef(new Float64Array(5));
+  const _medYArr = useRef(new Float64Array(5));
+  const _medZArr = useRef(new Float64Array(5));
 
   // Transient (touch) hit-test
   const transientHitSourceRef = useRef(null);
@@ -110,10 +119,12 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
       touchStartAngle.current = Math.atan2(dy, dx);
       touchStartScale.current = scaleRef.current;
       touchStartRot.current = rotationRef.current;
+      isDraggingModel.current = false;
     } else if (e.touches.length === 1) {
-      // Single finger: vertical drag for height
+      // Single finger: drag to reposition model in space
+      singleTouchStartX.current = e.touches[0].clientX;
       singleTouchStartY.current = e.touches[0].clientY;
-      singleTouchStartHeight.current = heightRef.current;
+      isDraggingModel.current = true;
     }
   }, []);
 
@@ -135,12 +146,30 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
       // Two-finger twist → rotation
       const angleDelta = (angle - touchStartAngle.current) * (180 / Math.PI);
       rotationRef.current = touchStartRot.current + angleDelta;
-    } else if (e.touches.length === 1 && activeTouches.current === 1) {
-      // Single finger vertical drag → height
-      const deltaY = singleTouchStartY.current - e.touches[0].clientY;
-      const heightDelta = deltaY * 0.005; // 5mm per pixel
-      heightRef.current = singleTouchStartHeight.current + heightDelta;
-      heightRef.current = Math.max(-3, Math.min(5, heightRef.current));
+    } else if (e.touches.length === 1 && activeTouches.current === 1 && isDraggingModel.current) {
+      // Single finger drag → move model in camera-relative XZ plane
+      const deltaX = e.touches[0].clientX - singleTouchStartX.current;
+      const deltaY = e.touches[0].clientY - singleTouchStartY.current;
+      singleTouchStartX.current = e.touches[0].clientX;
+      singleTouchStartY.current = e.touches[0].clientY;
+
+      // Convert screen-space pixels to world-space movement
+      // Use camera orientation to determine movement direction
+      const cam = cameraRef.current;
+      if (cam) {
+        const speed = 0.002; // meters per pixel
+        // Get camera's right and forward vectors projected onto XZ
+        const right = new THREE.Vector3();
+        const forward = new THREE.Vector3();
+        cam.getWorldDirection(forward);
+        right.crossVectors(forward, cam.up).normalize();
+        // Project forward onto horizontal plane
+        forward.y = 0;
+        forward.normalize();
+
+        placedPosRef.current.x += right.x * deltaX * speed + forward.x * deltaY * speed;
+        placedPosRef.current.z += right.z * deltaX * speed + forward.z * deltaY * speed;
+      }
     }
   }, []);
 
@@ -479,24 +508,42 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
             consecutiveHits.current++;
 
             _tmpMat4.current.fromArray(hitPose.transform.matrix);
-            const rawPos = _tmpPos.current;
-            const rawQuat = _tmpQuat.current;
-            _tmpMat4.current.decompose(rawPos, rawQuat, _tmpScale.current);
+            _tmpMat4.current.decompose(_tmpPos.current, _tmpQuat.current, _tmpScale.current);
 
-            // Median filter
-            const pb = hitPosBuffer.current;
-            const qb = hitQuatBuffer.current;
-            pb.push(rawPos.clone());
-            qb.push(rawQuat.clone());
-            if (pb.length > HIT_BUFFER_SIZE) pb.shift();
-            if (qb.length > HIT_BUFFER_SIZE) qb.shift();
+            // Ring buffer median filter (zero allocation)
+            const bufPos = _hitBufPos.current;
+            const bufQuat = _hitBufQuat.current;
+            const idx = _hitBufIdx.current % HIT_BUFFER_SIZE;
+            bufPos[idx].copy(_tmpPos.current);
+            bufQuat[idx].copy(_tmpQuat.current);
+            _hitBufIdx.current++;
+            const count = Math.min(_hitBufIdx.current, HIT_BUFFER_SIZE);
+            _hitBufCount.current = count;
 
-            let fPos = rawPos.clone(), fQuat = rawQuat.clone();
-            if (pb.length >= 3) {
-              fPos.set(median(pb.map(p => p.x)), median(pb.map(p => p.y)), median(pb.map(p => p.z)));
+            const fPos = _filteredPos.current;
+            let fQuat = bufQuat[idx]; // default: latest
+
+            if (count >= 3) {
+              // Median per axis using pre-allocated typed arrays
+              const mx = _medXArr.current;
+              const my = _medYArr.current;
+              const mz = _medZArr.current;
+              for (let i = 0; i < count; i++) { mx[i] = bufPos[i].x; my[i] = bufPos[i].y; mz[i] = bufPos[i].z; }
+              const sx = Array.prototype.slice.call(mx, 0, count).sort();
+              const sy = Array.prototype.slice.call(my, 0, count).sort();
+              const sz = Array.prototype.slice.call(mz, 0, count).sort();
+              const mid = count >> 1;
+              fPos.set(
+                count & 1 ? sx[mid] : (sx[mid - 1] + sx[mid]) * 0.5,
+                count & 1 ? sy[mid] : (sy[mid - 1] + sy[mid]) * 0.5,
+                count & 1 ? sz[mid] : (sz[mid - 1] + sz[mid]) * 0.5
+              );
+              // Pick quaternion closest to median position
               let bi = 0, bd = Infinity;
-              for (let i = 0; i < pb.length; i++) { const d = pb[i].distanceToSquared(fPos); if (d < bd) { bd = d; bi = i; } }
-              fQuat = qb[bi];
+              for (let i = 0; i < count; i++) { const d = bufPos[i].distanceToSquared(fPos); if (d < bd) { bd = d; bi = i; } }
+              fQuat = bufQuat[bi];
+            } else {
+              fPos.copy(_tmpPos.current);
             }
 
             if (!reticleHasFirstPose.current) {
@@ -567,7 +614,9 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
           const s = scaleRef.current;
           mg.scale.set(s, s, s);
           mg.rotation.y = (rotationRef.current * Math.PI) / 180;
+          mg.position.x = placedPosRef.current.x;
           mg.position.y = placedPosRef.current.y + heightRef.current;
+          mg.position.z = placedPosRef.current.z;
 
           // Anchor drift correction
           if (anchorRef.current) {
@@ -723,11 +772,11 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
       } catch {}
     }
 
-    hitPosBuffer.current = [];
-    hitQuatBuffer.current = [];
+    _hitBufIdx.current = 0;
+    _hitBufCount.current = 0;
 
     // Show gesture hint briefly
-    setGestureHint('Pinch to resize • Twist to rotate • Drag to adjust height');
+    setGestureHint('Drag to move • Pinch to resize • Twist to rotate');
     setTimeout(() => setGestureHint(''), 4000);
 
     updatePhase('placed');
