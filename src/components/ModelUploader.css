@@ -137,18 +137,25 @@
   transform: translateY(0);
 }
 
-.sample-btn {
-  width: 100%;
-  max-width: 400px;
-  margin: 0 auto;
-  display: block;
-  background: #f5f5f5;
-  color: #1a1a1a;
-  border: 1px solid #e5e5e5;
+/* Extract spinner for zip processing */
+.drop-zone.extracting {
+  border-color: #1a1a1a;
+  background: #fafafa;
+  pointer-events: none;
 }
 
-.sample-btn:hover {
-  background: #e5e5e5;
+.extract-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(0,0,0,0.1);
+  border-top-color: #1a1a1a;
+  border-radius: 50%;
+  animation: extractSpin 0.7s linear infinite;
+  margin: 0 auto 1rem;
+}
+
+@keyframes extractSpin {
+  to { transform: rotate(360deg); }
 }
 
 .current-model {

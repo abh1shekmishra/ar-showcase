@@ -43,7 +43,8 @@ function App() {
           </svg>
           ARise
         </h1>
-        <p className="subtitle">Universal Web-Based AR Viewer for iOS & Android</p>
+        <p className="subtitle">Universal AR Viewer • Crafted for Precision</p>
+        <p className="badge">By RedHut Studios</p>
       </header>
 
       <main className="app-main">
@@ -118,9 +119,12 @@ function App() {
       </main>
 
       <footer className="app-footer">
-        <p>
-          Supports GLB & GLTF formats • Works on iOS (AR Quick Look) & Android (Scene Viewer)
-        </p>
+        <div className="footer-content">
+          <p className="footer-tech">Supports GLB & GLTF formats • Works on iOS (AR Quick Look) & Android (Scene Viewer)</p>
+          <p className="footer-credit">
+            Built with craft by <a href="https://redhutstudios.in" target="_blank" rel="noopener noreferrer">RedHut Studios</a>
+          </p>
+        </div>
       </footer>
     </div>
   )

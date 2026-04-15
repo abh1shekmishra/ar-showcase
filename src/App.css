@@ -23,10 +23,10 @@ body {
 .app-header {
   background: #ffffff;
   color: #1a1a1a;
-  padding: 1.5rem 2rem;
+  padding: 2rem 2rem 1.75rem;
   text-align: center;
   border-bottom: 1px solid #e5e5e5;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
 }
 
 .app-header h1 {
@@ -35,9 +35,9 @@ body {
   justify-content: center;
   gap: 0.75rem;
   font-size: 2rem;
-  font-weight: 600;
-  margin-bottom: 0.5rem;
-  letter-spacing: -0.02em;
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+  letter-spacing: -0.03em;
 }
 
 .app-header h1 svg {
@@ -59,6 +59,19 @@ body {
   color: #666;
   font-weight: 400;
   letter-spacing: 0.01em;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #1a1a1a;
+  background: linear-gradient(135deg, #f0f0f0 0%, #e8e8e8 100%);
+  padding: 0.35rem 0.85rem;
+  border-radius: 20px;
+  letter-spacing: 0.02em;
+  margin-top: 0.5rem;
+  border: 1px solid #e0e0e0;
 }
 
 /* Main Content */
@@ -264,12 +277,42 @@ body {
 /* Footer */
 .app-footer {
   background: #ffffff;
-  padding: 1rem;
+  padding: 1.5rem;
   text-align: center;
-  color: #999;
-  font-size: 0.85rem;
   border-top: 1px solid #e5e5e5;
   letter-spacing: 0.01em;
+}
+
+.footer-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.footer-tech {
+  color: #999;
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.footer-credit {
+  color: #666;
+  font-size: 0.9rem;
+  margin: 0;
+  font-weight: 500;
+}
+
+.footer-credit a {
+  color: #1a1a1a;
+  text-decoration: none;
+  font-weight: 700;
+  border-bottom: 2px solid #1a1a1a;
+  transition: all 0.2s ease;
+}
+
+.footer-credit a:hover {
+  opacity: 0.75;
 }
 
 /* Responsive Design */

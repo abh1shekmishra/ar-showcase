@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import '@google/model-viewer';
 import './ARViewer.css';
 
@@ -17,6 +17,8 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
   const [environment, setEnvironment] = useState('neutral');
   const [exposure, setExposure] = useState(1);
   const [skyboxImage, setSkyboxImage] = useState('');
+  const preARScaleRef = useRef(1);
+  const preARRotationRef = useRef(0);
 
   const environments = [
     { value: 'neutral', label: '⬜ Blank', exposure: 1, skybox: '' },
@@ -128,21 +130,31 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         console.log('✅ Model loaded successfully');
         addDebugMessage('✅ Model loaded successfully!', 'success');
         
-        // Get model info
+        // Get model info including real-world dimensions
         const model = modelViewer.model;
         if (model) {
+          const dimensions = modelViewer.getDimensions();
           const info = {
             size: model.size,
-            hasAnimations: modelViewer.availableAnimations?.length > 0
+            hasAnimations: modelViewer.availableAnimations?.length > 0,
+            dimensions: dimensions
           };
           setModelInfo(info);
+          
+          if (dimensions) {
+            const w = (dimensions.x * 100).toFixed(1);
+            const h = (dimensions.y * 100).toFixed(1);
+            const d = (dimensions.z * 100).toFixed(1);
+            addDebugMessage(`📐 Size: ${w} × ${h} × ${d} cm`, 'info');
+          }
           addDebugMessage(`Animations: ${info.hasAnimations ? 'Yes' : 'None'}`, 'info');
+          addDebugMessage('📌 AR uses real-world scale (ar-scale: fixed)', 'success');
         }
 
-        // Hide model info after 5 seconds
+        // Hide model info after 6 seconds
         setTimeout(() => {
           setModelInfo(null);
-        }, 5000);
+        }, 6000);
       };
 
       // Error event
@@ -214,15 +226,40 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         console.log('AR Status:', status);
         
         if (status === 'session-started') {
-          addDebugMessage('🎯 AR session started!', 'success');
+          addDebugMessage('🎯 AR session started! Scanning for surfaces...', 'success');
+          addDebugMessage('� Real-world scale locked — model at true size', 'info');
           setIsInAR(true);
+          
+          // Save current preview scale/rotation and reset for AR
+          // AR should use the model's authored dimensions (ar-scale="fixed")
+          preARScaleRef.current = scale;
+          preARRotationRef.current = rotationY;
+          
+          // Reset model-viewer scale to 1 so AR uses real dimensions
+          if (modelViewer) {
+            modelViewer.scale = '1 1 1';
+            modelViewer.orientation = '0deg 0deg 0deg';
+          }
+        } else if (status === 'object-placed') {
+          addDebugMessage('✅ Model placed! Anchored to surface.', 'success');
         } else if (status === 'not-presenting') {
           addDebugMessage('AR session ended', 'info');
           setIsInAR(false);
+          
+          // Restore preview scale/rotation after AR
+          if (modelViewer) {
+            const s = preARScaleRef.current;
+            modelViewer.scale = `${s} ${s} ${s}`;
+            modelViewer.orientation = `0deg ${preARRotationRef.current}deg 0deg`;
+          }
         } else if (status === 'failed') {
           const errorMsg = 'AR failed. Model may be too large or incompatible.';
           setError(errorMsg);
           addDebugMessage(`❌ ${errorMsg}`, 'error');
+          addDebugMessage('🔧 Troubleshooting:', 'warning');
+          addDebugMessage('- Ensure adequate lighting', 'warning');
+          addDebugMessage('- Try a different flat surface', 'warning');
+          addDebugMessage('- Move camera slowly and deliberately', 'warning');
           setIsInAR(false);
           
           if (isIOS) {
@@ -231,16 +268,30 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         }
       };
 
+      // AR tracking events — surface detection quality
+      const handleARTracking = (event) => {
+        const trackingState = event.detail.status;
+        console.log('AR Tracking:', trackingState);
+        
+        if (trackingState === 'tracking') {
+          addDebugMessage('✅ Surface detected — tap to place!', 'success');
+        } else if (trackingState === 'not-tracking') {
+          addDebugMessage('🔍 Looking for surfaces...', 'info');
+        }
+      };
+
       modelViewer.addEventListener('load', handleLoad);
       modelViewer.addEventListener('error', handleError);
       modelViewer.addEventListener('progress', handleProgress);
       modelViewer.addEventListener('ar-status', handleARStatus);
+      modelViewer.addEventListener('ar-tracking', handleARTracking);
 
       return () => {
         modelViewer.removeEventListener('load', handleLoad);
         modelViewer.removeEventListener('error', handleError);
         modelViewer.removeEventListener('progress', handleProgress);
         modelViewer.removeEventListener('ar-status', handleARStatus);
+        modelViewer.removeEventListener('ar-tracking', handleARTracking);
       };
     }
   }, [modelSrc]);
@@ -275,6 +326,8 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
     const modelViewer = modelViewerRef.current;
     if (modelViewer) {
       modelViewer.resetTurntableRotation();
+      modelViewer.cameraOrbit = '0deg 75deg 105%';
+      modelViewer.fieldOfView = 'auto';
     }
   };
 
@@ -317,22 +370,22 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         alt="3D Model"
         ar
         ar-modes="webxr scene-viewer quick-look"
-        ar-placement="floor wall"
+        ar-placement="floor wall ceiling"
+        ar-scale="fixed"
         camera-controls
-        touch-action="pan-y"
-        shadow-intensity="1"
+        touch-action="none"
+        shadow-intensity="2"
+        shadow-softness="0.5"
         exposure={exposure}
         environment-image={environment}
         skybox-image={skyboxImage}
         auto-rotate
+        rotation-per-second="20deg"
         camera-orbit="0deg 75deg 105%"
         min-camera-orbit="auto auto 5%"
         max-camera-orbit="auto auto 500%"
-        interpolation-decay="200"
-        ar-scale="auto"
-        ios-src=""
+        interpolation-decay="100"
         xr-environment
-        disable-tap
         class="model-viewer"
       >
         {/* AR Button */}
@@ -346,22 +399,52 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
           View in AR
         </button>
 
-        {/* AR Prompt - Custom overlay for AR instructions */}
+        {/* AR Prompt - Scanning overlay shown before model placement */}
         <div id="ar-prompt" slot="ar-prompt">
-          <div className="ar-prompt-content">
-            <div className="scanning-indicator">
-              <div className="scan-line"></div>
-              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
-                <rect x="3" y="3" width="7" height="7" />
-                <rect x="14" y="3" width="7" height="7" />
-                <rect x="3" y="14" width="7" height="7" />
-                <rect x="14" y="14" width="7" height="7" />
-              </svg>
+          <div className="ar-scan-overlay">
+            {/* Corner brackets */}
+            <div className="scan-frame">
+              <div className="scan-corner scan-corner-tl"></div>
+              <div className="scan-corner scan-corner-tr"></div>
+              <div className="scan-corner scan-corner-bl"></div>
+              <div className="scan-corner scan-corner-br"></div>
+              
+              {/* Animated scan line */}
+              <div className="scan-beam"></div>
+              
+              {/* Grid dots */}
+              <div className="scan-grid">
+                {Array.from({ length: 25 }).map((_, i) => (
+                  <div key={i} className="scan-dot" style={{ animationDelay: `${i * 0.08}s` }}></div>
+                ))}
+              </div>
+              
+              {/* Center reticle */}
+              <div className="scan-reticle">
+                <div className="reticle-ring"></div>
+                <div className="reticle-crosshair-h"></div>
+                <div className="reticle-crosshair-v"></div>
+                <div className="reticle-dot"></div>
+              </div>
             </div>
-            <h3>Starting AR...</h3>
-            <p>Point your camera at a flat surface</p>
-            <p className="ar-tip">The model will appear - tap to place it where you want</p>
-            <p className="ar-note">Move slowly for better surface detection</p>
+            
+            {/* Status text */}
+            <div className="scan-status">
+              <div className="scan-status-indicator">
+                <div className="scan-pulse"></div>
+                <span>Scanning</span>
+              </div>
+              <p className="scan-instruction">
+                Point your camera at any surface
+              </p>
+              <p className="scan-hint">Move slowly • Good lighting helps</p>
+              <p className="scan-tap-hint">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M9 11.24V7.5C9 6.12 10.12 5 11.5 5S14 6.12 14 7.5v3.74c1.21-.81 2-2.18 2-3.74C16 5.01 13.99 3 11.5 3S7 5.01 7 7.5c0 1.56.79 2.93 2 3.74zm9.84 4.63l-4.54-2.26c-.17-.07-.35-.11-.54-.11H13v-6c0-.83-.67-1.5-1.5-1.5S10 6.67 10 7.5v10.74l-3.43-.72c-.08-.01-.15-.03-.24-.03-.31 0-.59.13-.79.33l-.79.8 4.94 4.94c.27.27.65.44 1.06.44h6.79c.75 0 1.33-.55 1.44-1.28l.75-5.27c.01-.07.02-.14.02-.2 0-.62-.38-1.16-.91-1.38z"/>
+                </svg>
+                Tap to place model
+              </p>
+            </div>
           </div>
         </div>
 
@@ -396,7 +479,11 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
       {modelLoaded && modelInfo && (
         <div className="model-info">
           <p>✅ Model loaded</p>
+          {modelInfo.dimensions && (
+            <p>📐 {(modelInfo.dimensions.x * 100).toFixed(0)} × {(modelInfo.dimensions.y * 100).toFixed(0)} × {(modelInfo.dimensions.z * 100).toFixed(0)} cm</p>
+          )}
           {modelInfo.hasAnimations && <p>🎬 Has animations</p>}
+          <p>📌 AR: Real-world scale</p>
         </div>
       )}
 
@@ -534,6 +621,15 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
           <ul>
             <li><strong>Desktop:</strong> Click and drag to rotate • Scroll to zoom • Right-click to pan</li>
             <li><strong>Mobile:</strong> Tap "View in AR" to place model in your space</li>
+            <li><strong>AR Placement:</strong> Works on floor, walls, and ceiling</li>
+            <li><strong>AR Accuracy Tips:</strong></li>
+            <ul style={{ marginLeft: '20px', marginTop: '5px' }}>
+              <li>✓ Move camera slowly for stable detection</li>
+              <li>✓ Ensure good lighting on the target surface</li>
+              <li>✓ Look for green gridlines (surface detected)</li>
+              <li>✓ Tap to place only when surface is clearly detected</li>
+              <li>✓ For ceiling: start from floor angle and slowly tilt up</li>
+            </ul>
             <li><strong>AR Controls:</strong></li>
             <ul style={{ marginLeft: '20px', marginTop: '5px' }}>
               <li>1 finger drag = Move model</li>

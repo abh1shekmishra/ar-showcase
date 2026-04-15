@@ -1,11 +1,82 @@
 import { useState, useRef } from 'react';
+import JSZip from 'jszip';
 import './ModelUploader.css';
 
 const ModelUploader = ({ onModelLoad }) => {
   const [modelUrl, setModelUrl] = useState('');
   const [urlInput, setUrlInput] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
   const fileInputRef = useRef(null);
+
+  const extractZip = async (file) => {
+    setIsExtracting(true);
+    try {
+      const zip = await JSZip.loadAsync(file);
+      const files = Object.keys(zip.files);
+
+      const glbFile = files.find(f => f.toLowerCase().endsWith('.glb'));
+      const gltfFile = files.find(f => f.toLowerCase().endsWith('.gltf'));
+      const targetFile = glbFile || gltfFile;
+
+      if (!targetFile) {
+        alert('No GLB or glTF file found inside the .zip archive.');
+        setIsExtracting(false);
+        return;
+      }
+
+      if (glbFile) {
+        const data = await zip.file(glbFile).async('blob');
+        const blob = new Blob([data], { type: 'model/gltf-binary' });
+        const url = URL.createObjectURL(blob);
+        setModelUrl(url);
+        onModelLoad(url, glbFile.split('/').pop());
+        console.log('✅ Extracted GLB from zip:', glbFile);
+      } else {
+        const gltfContent = await zip.file(gltfFile).async('string');
+        const gltfDir = gltfFile.includes('/') ? gltfFile.substring(0, gltfFile.lastIndexOf('/') + 1) : '';
+
+        let gltfJson;
+        try {
+          gltfJson = JSON.parse(gltfContent);
+        } catch {
+          alert('Failed to parse glTF file inside the zip.');
+          setIsExtracting(false);
+          return;
+        }
+
+        const resourceMap = {};
+        for (const fileName of files) {
+          if (fileName === gltfFile || zip.files[fileName].dir) continue;
+          const relativePath = fileName.startsWith(gltfDir) ? fileName.slice(gltfDir.length) : fileName;
+          const data = await zip.file(fileName).async('blob');
+          resourceMap[relativePath] = URL.createObjectURL(data);
+        }
+
+        if (gltfJson.buffers) {
+          gltfJson.buffers.forEach(buf => {
+            if (buf.uri && resourceMap[buf.uri]) buf.uri = resourceMap[buf.uri];
+          });
+        }
+        if (gltfJson.images) {
+          gltfJson.images.forEach(img => {
+            if (img.uri && resourceMap[img.uri]) img.uri = resourceMap[img.uri];
+          });
+        }
+
+        const gltfBlob = new Blob([JSON.stringify(gltfJson)], { type: 'model/gltf+json' });
+        const url = URL.createObjectURL(gltfBlob);
+        setModelUrl(url);
+        onModelLoad(url, gltfFile.split('/').pop());
+        console.log('✅ Extracted glTF from zip:', gltfFile);
+      }
+    } catch (err) {
+      console.error('❌ Zip extraction error:', err);
+      alert('Failed to extract model from zip. The file may be corrupted.');
+    } finally {
+      setIsExtracting(false);
+    }
+  };
 
   const handleFileUpload = async (file) => {
     if (!file) return;
@@ -13,9 +84,15 @@ const ModelUploader = ({ onModelLoad }) => {
     const fileName = file.name.toLowerCase();
     const isGLB = fileName.endsWith('.glb');
     const isGLTF = fileName.endsWith('.gltf');
+    const isZIP = fileName.endsWith('.zip');
 
-    if (!isGLB && !isGLTF) {
-      alert('Please upload a GLB or GLTF file.\n\nFor other formats (FBX, OBJ, etc.), use an online converter:\n• https://products.aspose.app/3d/conversion/fbx-to-glb\n• https://anyconv.com/');
+    if (!isGLB && !isGLTF && !isZIP) {
+      alert('Please upload a GLB, GLTF, or ZIP file.\n\nSketchfab downloads come as .zip — just drop the whole zip here.');
+      return;
+    }
+
+    if (isZIP) {
+      await extractZip(file);
       return;
     }
 
@@ -89,48 +166,50 @@ const ModelUploader = ({ onModelLoad }) => {
     }
   };
 
-  const loadSampleModel = () => {
-    // Using a smaller, more reliable sample model
-    const sampleUrl = 'https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/Duck/glTF-Binary/Duck.glb';
-    setModelUrl(sampleUrl);
-    onModelLoad(sampleUrl, 'Duck.glb');
-    console.log('Loading sample model:', sampleUrl);
-  };
-
   return (
     <div className="model-uploader">
       <h2>Load 3D Model</h2>
       
       <div 
-        className={`drop-zone ${isDragging ? 'dragging' : ''}`}
+        className={`drop-zone ${isDragging ? 'dragging' : ''} ${isExtracting ? 'extracting' : ''}`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => !isExtracting && fileInputRef.current?.click()}
       >
-        <svg 
-          width="64" 
-          height="64" 
-          viewBox="0 0 24 24" 
-          fill="none" 
-          stroke="currentColor" 
-          strokeWidth="2"
-        >
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="17 8 12 3 7 8" />
-          <line x1="12" y1="3" x2="12" y2="15" />
-        </svg>
-        <p>Drag & Drop 3D Model Here</p>
-        <p className="file-types">or click to browse (GLB, GLTF only)</p>
-        <p className="file-types" style={{ fontSize: '0.75rem', marginTop: '0.5rem', color: '#999' }}>
-          Need to convert? Use <a href="https://products.aspose.app/3d/conversion/fbx-to-glb" target="_blank" rel="noopener noreferrer" style={{ color: '#1a1a1a', textDecoration: 'underline' }}>online converter</a>
-        </p>
+        {isExtracting ? (
+          <>
+            <div className="extract-spinner"></div>
+            <p>Extracting model from zip...</p>
+            <p className="file-types">Finding GLB/glTF files and textures</p>
+          </>
+        ) : (
+          <>
+            <svg 
+              width="64" 
+              height="64" 
+              viewBox="0 0 24 24" 
+              fill="none" 
+              stroke="currentColor" 
+              strokeWidth="2"
+            >
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+            <p>Drag & Drop 3D Model Here</p>
+            <p className="file-types">GLB, GLTF, or ZIP (Sketchfab downloads)</p>
+            <p className="file-types" style={{ fontSize: '0.75rem', marginTop: '0.5rem', color: '#999' }}>
+              Drop a Sketchfab .zip — we'll extract the model automatically
+            </p>
+          </>
+        )}
       </div>
 
       <input
         ref={fileInputRef}
         type="file"
-        accept=".glb,.gltf"
+        accept=".glb,.gltf,.zip"
         onChange={handleFileChange}
         style={{ display: 'none' }}
       />
@@ -151,14 +230,6 @@ const ModelUploader = ({ onModelLoad }) => {
           Load URL
         </button>
       </form>
-
-      <div className="divider">
-        <span>OR</span>
-      </div>
-
-      <button onClick={loadSampleModel} className="sample-btn">
-        Load Sample Model
-      </button>
 
       {modelUrl && (
         <div className="current-model">
