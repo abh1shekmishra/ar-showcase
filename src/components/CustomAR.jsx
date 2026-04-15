@@ -4,13 +4,6 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import './CustomAR.css';
 
-// Median of a numeric array
-const median = (arr) => {
-  const s = [...arr].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-};
-
 const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const containerRef = useRef(null);
   const overlayRef = useRef(null);
@@ -78,9 +71,19 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const _hitBufIdx = useRef(0);
   const _hitBufCount = useRef(0);
   const _filteredPos = useRef(new THREE.Vector3());
-  const _medXArr = useRef(new Float64Array(5));
-  const _medYArr = useRef(new Float64Array(5));
-  const _medZArr = useRef(new Float64Array(5));
+  // Pre-allocated sort buffers (avoid Array.slice().sort() per frame)
+  const _sortBufX = useRef(new Float64Array(5));
+  const _sortBufY = useRef(new Float64Array(5));
+  const _sortBufZ = useRef(new Float64Array(5));
+
+  // Cached reticle child refs (avoid getObjectByName per frame)
+  const _scanArcRef = useRef(null);
+  const _glowRef = useRef(null);
+  const _diamondRef = useRef(null);
+
+  // Pre-allocated drag vectors
+  const _dragRight = useRef(new THREE.Vector3());
+  const _dragForward = useRef(new THREE.Vector3());
 
   // Transient (touch) hit-test
   const transientHitSourceRef = useRef(null);
@@ -157,13 +160,16 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
       // Use camera orientation to determine movement direction
       const cam = cameraRef.current;
       if (cam) {
-        const speed = 0.002; // meters per pixel
-        // Get camera's right and forward vectors projected onto XZ
-        const right = new THREE.Vector3();
-        const forward = new THREE.Vector3();
+        // Scale speed with distance from camera to model (farther = faster drag)
+        const dx2 = cam.position.x - placedPosRef.current.x;
+        const dz2 = cam.position.z - placedPosRef.current.z;
+        const dist = Math.sqrt(dx2 * dx2 + dz2 * dz2);
+        const speed = Math.max(0.003, dist * 0.004); // scales with distance
+
+        const right = _dragRight.current;
+        const forward = _dragForward.current;
         cam.getWorldDirection(forward);
         right.crossVectors(forward, cam.up).normalize();
-        // Project forward onto horizontal plane
         forward.y = 0;
         forward.normalize();
 
@@ -306,6 +312,11 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         reticle.visible = false;
         scene.add(reticle);
         reticleRef.current = reticle;
+
+        // Cache child references for render loop (avoid getObjectByName)
+        _scanArcRef.current = reticle.getObjectByName('scanArc');
+        _glowRef.current = reticle.getObjectByName('glow');
+        _diamondRef.current = reticle.getObjectByName('diamond');
 
         // Plane visualization group (ARCore-style surface overlay)
         const planeGroup = new THREE.Group();
@@ -524,14 +535,21 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
             let fQuat = bufQuat[idx]; // default: latest
 
             if (count >= 3) {
-              // Median per axis using pre-allocated typed arrays
-              const mx = _medXArr.current;
-              const my = _medYArr.current;
-              const mz = _medZArr.current;
-              for (let i = 0; i < count; i++) { mx[i] = bufPos[i].x; my[i] = bufPos[i].y; mz[i] = bufPos[i].z; }
-              const sx = Array.prototype.slice.call(mx, 0, count).sort();
-              const sy = Array.prototype.slice.call(my, 0, count).sort();
-              const sz = Array.prototype.slice.call(mz, 0, count).sort();
+              // Median per axis — zero allocation (insertion sort in-place on pre-allocated buffers)
+              const sx = _sortBufX.current;
+              const sy = _sortBufY.current;
+              const sz = _sortBufZ.current;
+              for (let i = 0; i < count; i++) { sx[i] = bufPos[i].x; sy[i] = bufPos[i].y; sz[i] = bufPos[i].z; }
+              // Insertion sort (5 elements max, faster than .sort() and no allocation)
+              for (let k = 0; k < 3; k++) {
+                const arr = k === 0 ? sx : k === 1 ? sy : sz;
+                for (let i = 1; i < count; i++) {
+                  const v = arr[i];
+                  let j = i - 1;
+                  while (j >= 0 && arr[j] > v) { arr[j + 1] = arr[j]; j--; }
+                  arr[j + 1] = v;
+                }
+              }
               const mid = count >> 1;
               fPos.set(
                 count & 1 ? sx[mid] : (sx[mid - 1] + sx[mid]) * 0.5,
@@ -564,17 +582,14 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
             const pulse = 0.85 + 0.2 * confidence + 0.08 * Math.sin(now * 0.005);
             ret.scale.set(pulse, pulse, pulse);
 
-            // Rotate the scanning arc
-            const scanArc = ret.getObjectByName('scanArc');
-            if (scanArc) scanArc.rotation.z = now * 0.003;
+            // Rotate the scanning arc (cached ref, no traversal)
+            if (_scanArcRef.current) _scanArcRef.current.rotation.z = now * 0.003;
 
             // Glow intensity grows with confidence
-            const glowMesh = ret.getObjectByName('glow');
-            if (glowMesh && glowMesh.material) glowMesh.material.opacity = 0.05 + confidence * 0.12;
+            if (_glowRef.current) _glowRef.current.material.opacity = 0.05 + confidence * 0.12;
 
             // Diamond brightness
-            const diamondMesh = ret.getObjectByName('diamond');
-            if (diamondMesh && diamondMesh.material) diamondMesh.material.opacity = 0.6 + confidence * 0.4;
+            if (_diamondRef.current) _diamondRef.current.material.opacity = 0.6 + confidence * 0.4;
 
             // Throttled surface info (max 2x/sec)
             if (now - lastUIUpdate.current > 500) {
@@ -593,9 +608,8 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
           } else if (ret) {
             consecutiveHits.current = 0;
             if (now - lastHitTime.current > 300) ret.visible = false;
-            // Keep arc rotating even without hit
-            const scanArc = ret.getObjectByName('scanArc');
-            if (scanArc) scanArc.rotation.z = now * 0.003;
+            // Keep arc rotating even without hit (cached ref)
+            if (_scanArcRef.current) _scanArcRef.current.rotation.z = now * 0.003;
             if (now - lastUIUpdate.current > 500) {
               lastUIUpdate.current = now;
               if (surfaceInfoRef.current !== 'Move slowly to scan surfaces...') {
@@ -618,8 +632,8 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
           mg.position.y = placedPosRef.current.y + heightRef.current;
           mg.position.z = placedPosRef.current.z;
 
-          // Anchor drift correction
-          if (anchorRef.current) {
+          // Anchor drift correction — only when NOT being dragged
+          if (anchorRef.current && !isDraggingModel.current) {
             try {
               const ap = frame.getPose(anchorRef.current.anchorSpace, localSpace);
               if (ap) {
