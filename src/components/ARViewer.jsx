@@ -48,6 +48,8 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
   };
 
   useEffect(() => {
+    if (showCustomAR) return undefined;
+
     const modelViewer = modelViewerRef.current;
     
     if (modelViewer) {
@@ -230,7 +232,7 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
         modelViewer.removeEventListener('progress', handleProgress);
       };
     }
-  }, [modelSrc]);
+  }, [modelSrc, showCustomAR]);
 
   // Update scale
   useEffect(() => {
@@ -300,72 +302,76 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
 
   return (
     <div className="ar-viewer-container">
-      <model-viewer
-        ref={modelViewerRef}
-        src={modelSrc}
-        alt="3D Model"
-        ar
-        ar-modes="scene-viewer quick-look"
-        camera-controls
-        touch-action="pan-y"
-        shadow-intensity="2"
-        shadow-softness="0.5"
-        exposure={exposure}
-        environment-image={environment}
-        skybox-image={skyboxImage}
-        auto-rotate
-        rotation-per-second="20deg"
-        camera-orbit="0deg 75deg 105%"
-        min-camera-orbit="auto auto 5%"
-        max-camera-orbit="auto auto 500%"
-        interpolation-decay="100"
-        class="model-viewer"
-      >
+      {!showCustomAR && (
+        <>
+          <model-viewer
+            ref={modelViewerRef}
+            src={modelSrc}
+            alt="3D Model"
+            ar
+            ar-modes="scene-viewer quick-look"
+            camera-controls
+            touch-action="pan-y"
+            shadow-intensity="2"
+            shadow-softness="0.5"
+            exposure={exposure}
+            environment-image={environment}
+            skybox-image={skyboxImage}
+            auto-rotate
+            rotation-per-second="20deg"
+            camera-orbit="0deg 75deg 105%"
+            min-camera-orbit="auto auto 5%"
+            max-camera-orbit="auto auto 500%"
+            interpolation-decay="100"
+            class="model-viewer"
+          >
 
 
-        {/* Loading Indicator */}
-        <div className="loading-indicator" slot="poster">
-          <div className="spinner"></div>
-          <p>Loading 3D Model...</p>
-        </div>
+            {/* Loading Indicator */}
+            <div className="loading-indicator" slot="poster">
+              <div className="spinner"></div>
+              <p>Loading 3D Model...</p>
+            </div>
 
-        {/* Error Message */}
-        <div className="error-message" slot="error">
-          <p>❌ Failed to load model</p>
-          <p>Please check:</p>
-          <ul>
-            <li>File format is GLB or GLTF</li>
-            <li>File size is under 50MB</li>
-            <li>URL is accessible (if loading from URL)</li>
-          </ul>
-        </div>
-      </model-viewer>
+            {/* Error Message */}
+            <div className="error-message" slot="error">
+              <p>❌ Failed to load model</p>
+              <p>Please check:</p>
+              <ul>
+                <li>File format is GLB or GLTF</li>
+                <li>File size is under 50MB</li>
+                <li>URL is accessible (if loading from URL)</li>
+              </ul>
+            </div>
+          </model-viewer>
 
-      {/* View in AR button */}
-      {modelLoaded && (
-        <button
-          className="ar-launch-btn"
-          onClick={() => {
-            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-            if (isIOS) {
-              // iOS: use model-viewer's Quick Look fallback
-              const mv = modelViewerRef.current;
-              if (mv && mv.canActivateAR) {
-                mv.activateAR();
-              } else {
-                setError('AR Quick Look requires Safari on iOS. Open this page in Safari.');
-              }
-            } else {
-              // Android/Desktop: use custom WebXR AR
-              setShowCustomAR(true);
-            }
-          }}
-        >
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="white">
-            <path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0-5C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z"/>
-          </svg>
-          View in AR
-        </button>
+          {/* View in AR button */}
+          {modelLoaded && (
+            <button
+              className="ar-launch-btn"
+              onClick={() => {
+                const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+                if (isIOS) {
+                  // iOS: use model-viewer's Quick Look fallback
+                  const mv = modelViewerRef.current;
+                  if (mv && mv.canActivateAR) {
+                    mv.activateAR();
+                  } else {
+                    setError('AR Quick Look requires Safari on iOS. Open this page in Safari.');
+                  }
+                } else {
+                  // Android/Desktop: use custom WebXR AR
+                  setShowCustomAR(true);
+                }
+              }}
+            >
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="white">
+                <path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0-5C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z"/>
+              </svg>
+              View in AR
+            </button>
+          )}
+        </>
       )}
 
       {/* Custom AR session */}
@@ -378,7 +384,7 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
       )}
 
       {/* Error Toast */}
-      {error && (
+      {!showCustomAR && error && (
         <div className="error-toast">
           <span>⚠️</span>
           <p>{error}</p>
@@ -387,7 +393,7 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
       )}
 
       {/* Model Info */}
-      {modelLoaded && modelInfo && (
+      {!showCustomAR && modelLoaded && modelInfo && (
         <div className="model-info">
           <p>✅ Model loaded</p>
           {modelInfo.dimensions && (
@@ -401,7 +407,7 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
 
 
       {/* Controls Overlay */}
-      {showControls && modelLoaded && (
+      {!showCustomAR && showControls && modelLoaded && (
         <div className="controls-overlay">
           <button 
             className="close-controls-btn"
@@ -519,7 +525,7 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
       )}
 
       {/* Instructions */}
-      {showInstructions && (
+      {!showCustomAR && showInstructions && (
         <div className="instructions">
           <button 
             className="close-instructions-btn"

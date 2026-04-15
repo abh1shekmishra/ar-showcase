@@ -4,6 +4,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import './CustomAR.css';
 
+const ENABLE_PLANE_VISUALIZATION = false;
+
 const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const containerRef = useRef(null);
   const overlayRef = useRef(null);
@@ -268,9 +270,9 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
       try {
         // Renderer
         const renderer = new THREE.WebGLRenderer({
-          alpha: true, antialias: true, powerPreference: 'high-performance',
+          alpha: true, antialias: false, powerPreference: 'high-performance',
         });
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.25));
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.xr.enabled = true;
         renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -383,10 +385,12 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         _diamondRef.current = reticle.getObjectByName('diamond');
 
         // Plane visualization group (ARCore-style surface overlay)
-        const planeGroup = new THREE.Group();
-        planeGroup.name = 'planeVisualization';
-        scene.add(planeGroup);
-        planeGroupRef.current = planeGroup;
+        if (ENABLE_PLANE_VISUALIZATION) {
+          const planeGroup = new THREE.Group();
+          planeGroup.name = 'planeVisualization';
+          scene.add(planeGroup);
+          planeGroupRef.current = planeGroup;
+        }
 
         // Load model
         const draco = new DRACOLoader();
@@ -467,7 +471,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
       const sessionInit = {
         requiredFeatures: ['hit-test'],
-        optionalFeatures: ['dom-overlay', 'light-estimation', 'anchors', 'plane-detection'],
+        optionalFeatures: ['dom-overlay', 'anchors', 'plane-detection'],
       };
       if (overlayRef.current) sessionInit.domOverlay = { root: overlayRef.current };
 
@@ -488,9 +492,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         const transientSource = await session.requestHitTestSourceForTransientInput({ profile: 'generic-touchscreen' });
         transientHitSourceRef.current = transientSource;
       } catch {} // Not available on all devices
-
-      let lightProbe = null;
-      try { lightProbe = await session.requestLightProbe(); } catch {}
 
       updatePhase('scanning');
 
@@ -538,23 +539,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         const ret = reticleRef.current;
         const mg = modelGroupRef.current;
         const fc = ++_frameCounter.current;
-
-        // Light estimation (every 15th frame — lighting changes very slowly)
-        if (fc % 15 === 0 && lightProbe && frame.getLightEstimate) {
-          try {
-            const est = frame.getLightEstimate(lightProbe);
-            if (est) {
-              const pi = est.primaryLightIntensity;
-              if (pi) {
-                const lum = Math.max(pi.x, pi.y, pi.z);
-                if (ambientRef.current) ambientRef.current.intensity += (Math.min(lum * 0.6, 2.5) - ambientRef.current.intensity) * 0.12;
-                if (dirLightRef.current) {
-                  dirLightRef.current.intensity += (Math.min(lum * 0.8, 3.0) - dirLightRef.current.intensity) * 0.12;
-                }
-              }
-            }
-          } catch {}
-        }
 
         // ── SCANNING ──
         if (currentPhase === 'scanning') {
@@ -756,7 +740,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         }
 
         // ── PLANE VISUALIZATION: every 5th frame in scanning, skip entirely once placed+hidden ──
-        if (fc % 5 === 0 && frame.detectedPlanes && planeGroupRef.current && !_planesAllHidden.current) {
+        if (ENABLE_PLANE_VISUALIZATION && fc % 5 === 0 && frame.detectedPlanes && planeGroupRef.current && !_planesAllHidden.current) {
           const existingPlanes = planeMeshesRef.current;
           const detectedPlanes = frame.detectedPlanes;
 
