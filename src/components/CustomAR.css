@@ -199,6 +199,59 @@
   text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
 }
 
+/* ── Surface mode selector (Floor / Wall / Ceiling) ── */
+.car-mode-selector {
+  position: absolute;
+  top: env(safe-area-inset-top, 16px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  z-index: 10;
+  pointer-events: auto;
+}
+
+.car-mode-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+  -webkit-tap-highlight-color: transparent;
+  white-space: nowrap;
+}
+
+.car-mode-btn:active {
+  transform: scale(0.95);
+}
+
+.car-mode-btn.car-mode-active {
+  background: rgba(0, 230, 118, 0.25);
+  color: #00e676;
+  box-shadow: 0 0 8px rgba(0, 230, 118, 0.15);
+}
+
+/* Aiming circle animation for wall/ceiling mode */
+.car-aim-ring {
+  transform-origin: center;
+  animation: carAimPulse 2s ease-in-out infinite;
+}
+
+@keyframes carAimPulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
 /* ── Gesture hint (placed mode) ── */
 .car-touch-capture {
   position: fixed;

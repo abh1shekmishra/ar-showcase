@@ -140,17 +140,120 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const planeMeshesRef = useRef(new Map()); // XRPlane → THREE.Mesh
   const planeGroupRef = useRef(null);
 
+  // Surface placement mode: floor (scan-based), wall/ceiling (camera-ray based)
+  const surfaceModeRef = useRef('floor'); // floor | wall | ceiling
+
   // ── UI state (minimal — only for phase transitions + errors) ──
   const [phase, setPhase] = useState('loading');
   const [error, setError] = useState(null);
   const [loadProgress, setLoadProgress] = useState(0);
   const [gestureHint, setGestureHint] = useState('');
+  const [surfaceMode, setSurfaceMode] = useState('floor');
 
   const isCeiling = modelCategory === 'Ceiling Lamps' || modelCategory === 'Chandeliers';
 
   const updatePhase = useCallback((p) => {
     phaseRef.current = p;
     setPhase(p);
+  }, []);
+
+  const updateSurfaceMode = useCallback((mode) => {
+    surfaceModeRef.current = mode;
+    setSurfaceMode(mode);
+  }, []);
+
+  // Camera-ray placement: place model at a fixed distance along the camera direction
+  // Returns { position: Vector3, quaternion: Quaternion } or null
+  const computeCameraRayPlacement = useCallback((frame, camera, mode) => {
+    if (!camera || !localSpaceRef.current) return null;
+
+    camera.getWorldPosition(_rayOrigin.current);
+    camera.getWorldDirection(_rayDirection.current).normalize();
+
+    // Try to snap to a real detected plane first
+    const detectedPlanes = frame.detectedPlanes;
+    if (detectedPlanes) {
+      let bestDist = Infinity;
+      let snapped = false;
+
+      for (const plane of detectedPlanes) {
+        const isWallMode = mode === 'wall';
+        const isCeilingMode = mode === 'ceiling';
+        if (isWallMode && plane.orientation !== 'vertical') continue;
+        if (isCeilingMode && plane.orientation === 'vertical') continue;
+
+        const polygon = plane.polygon;
+        if (!polygon || polygon.length < 3) continue;
+
+        const planePose = frame.getPose(plane.planeSpace, localSpaceRef.current);
+        if (!planePose) continue;
+
+        _tmpMat4.current.fromArray(planePose.transform.matrix);
+        _tmpMat4.current.decompose(_planeOrigin.current, _planeQuaternion.current, _tmpScale.current);
+
+        // For ceiling mode, check if this plane is actually above the camera
+        if (isCeilingMode) {
+          const planeUp = _tmpSurfaceNormal.current.set(0, 1, 0).applyQuaternion(_planeQuaternion.current);
+          if (planeUp.y > -0.5) continue; // Not a ceiling
+        }
+
+        const planeNormal = _tmpSurfaceNormal.current.set(0, 1, 0).applyQuaternion(_planeQuaternion.current).normalize();
+        const denom = planeNormal.dot(_rayDirection.current);
+        if (Math.abs(denom) < 0.02) continue;
+
+        const dist = planeNormal.dot(_planeDelta.current.copy(_planeOrigin.current).sub(_rayOrigin.current)) / denom;
+        if (dist <= 0.1 || dist > 6 || dist >= bestDist) continue;
+
+        const intersection = _planeIntersection.current.copy(_rayDirection.current).multiplyScalar(dist).add(_rayOrigin.current);
+        const localPt = _planeLocalPoint.current
+          .copy(intersection).sub(_planeOrigin.current)
+          .applyQuaternion(_planeLocalInverse.current.copy(_planeQuaternion.current).invert());
+
+        if (!pointInPolygonXZ(polygon, localPt.x, localPt.z)) continue;
+
+        _tmpPos.current.copy(intersection);
+        _tmpQuat.current.copy(_planeQuaternion.current);
+        bestDist = dist;
+        snapped = true;
+      }
+
+      if (snapped) {
+        return { position: _tmpPos.current, quaternion: _tmpQuat.current };
+      }
+    }
+
+    // No real plane found — use synthetic placement
+    if (mode === 'wall') {
+      // Place 1.5m along camera ray, oriented facing the user
+      const placeDist = 1.5;
+      _tmpPos.current.copy(_rayDirection.current).multiplyScalar(placeDist).add(_rayOrigin.current);
+
+      // Wall quaternion: normal facing toward camera (back against wall)
+      // The wall plane's "up" should be world up, normal = -cameraDirection projected to XZ
+      const wallNormal = _tmpSurfaceNormal.current.set(-_rayDirection.current.x, 0, -_rayDirection.current.z).normalize();
+      // Build a rotation from Y-up plane to face us: the plane's local Y is world Y, local Z is wallNormal
+      const wallRight = _dragRight.current.crossVectors(new THREE.Vector3(0, 1, 0), wallNormal).normalize();
+      const m = _tmpMat4.current.makeBasis(wallRight, new THREE.Vector3(0, 1, 0), wallNormal);
+      _tmpQuat.current.setFromRotationMatrix(m);
+      // Convert to surface quaternion convention (Y-up becomes the wall normal)
+      // Our classifySurface expects: applying quat to (0,1,0) should give the surface normal
+      // For a wall, the surface normal is the wallNormal (horizontal)
+      _tmpQuat.current.setFromUnitVectors(new THREE.Vector3(0, 1, 0), wallNormal);
+
+      return { position: _tmpPos.current, quaternion: _tmpQuat.current };
+    }
+
+    if (mode === 'ceiling') {
+      // Place 2.5m above camera position
+      const ceilingHeight = 2.5;
+      _tmpPos.current.set(_rayOrigin.current.x, _rayOrigin.current.y + ceilingHeight, _rayOrigin.current.z);
+      // Ceiling quaternion: surface normal points down → applying quat to (0,1,0) should give (0,-1,0)
+      _tmpQuat.current.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, -1, 0));
+
+      return { position: _tmpPos.current, quaternion: _tmpQuat.current };
+    }
+
+    return null;
   }, []);
 
   const primeReticlePose = useCallback((position, quaternion, now = performance.now()) => {
@@ -594,6 +697,19 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
       session.addEventListener('select', (event) => {
         if (phaseRef.current !== 'scanning') return;
 
+        const mode = surfaceModeRef.current;
+
+        // Wall/Ceiling mode: camera-ray placement (no scanning needed)
+        if (mode === 'wall' || mode === 'ceiling') {
+          const result = computeCameraRayPlacement(event.frame, cameraRef.current, mode);
+          if (result) {
+            primeReticlePose(result.position, result.quaternion);
+            placeModelAtReticle(event.frame, localSpace);
+          }
+          return;
+        }
+
+        // Floor mode: existing scan-and-place behavior
         if (reticleRef.current && reticleRef.current.visible) {
           placeModelAtReticle(event.frame, localSpace);
           return;
@@ -658,6 +774,27 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
         // ── SCANNING ──
         if (currentPhase === 'scanning') {
+          const mode = surfaceModeRef.current;
+
+          // Wall/Ceiling mode: no 3D reticle scanning, just show crosshair + wait for tap
+          if (mode === 'wall' || mode === 'ceiling') {
+            if (ret) ret.visible = false;
+            // Update hint text periodically
+            if (now - lastUIUpdate.current > 500) {
+              lastUIUpdate.current = now;
+              const stRef = surfaceTextRef.current;
+              if (stRef) {
+                const hint = mode === 'wall'
+                  ? '◧ Point at wall and tap to place'
+                  : '⬆ Point at ceiling and tap to place';
+                if (hint !== surfaceInfoRef.current) {
+                  surfaceInfoRef.current = hint;
+                  stRef.textContent = hint;
+                }
+              }
+            }
+          } else {
+          // Floor mode: existing hit-test + median filter scan loop
           // Hit-test + median filter: every 2nd frame (halves XR API object allocations)
           // Reticle lerp runs every frame for smooth motion regardless
           if (fc & 1) {
@@ -791,6 +928,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               }
             }
           }
+          } // close floor-mode else branch
         }
 
         // ── PLACED: apply gesture transforms ──
@@ -973,6 +1111,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
     handleTouchEnd,
     primeReticlePose,
     resolveVerticalPlaneFallbackPose,
+    computeCameraRayPlacement,
   ]);
 
   // Place model at reticle
@@ -1066,9 +1205,17 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
                 <line x1="105" y1="100" x2="115" y2="100" stroke="rgba(255,255,255,0.7)" strokeWidth="1.5"/>
                 {/* Center dot */}
                 <circle cx="100" cy="100" r="2" fill="rgba(255,255,255,0.9)"/>
-                {/* Rotating scan arc */}
-                <circle cx="100" cy="100" r="60" stroke="rgba(0,230,118,0.2)" strokeWidth="1" strokeDasharray="8 12" className="car-scan-ring-slow"/>
-                <path d="M100 30 A70 70 0 0 1 170 100" stroke="rgba(0,230,118,0.5)" strokeWidth="2" strokeLinecap="round" className="car-scan-arc"/>
+                {/* Rotating scan arc — only in floor mode */}
+                {surfaceMode === 'floor' && (
+                  <>
+                    <circle cx="100" cy="100" r="60" stroke="rgba(0,230,118,0.2)" strokeWidth="1" strokeDasharray="8 12" className="car-scan-ring-slow"/>
+                    <path d="M100 30 A70 70 0 0 1 170 100" stroke="rgba(0,230,118,0.5)" strokeWidth="2" strokeLinecap="round" className="car-scan-arc"/>
+                  </>
+                )}
+                {/* Aiming circle for wall/ceiling mode */}
+                {surfaceMode !== 'floor' && (
+                  <circle cx="100" cy="100" r="40" stroke="rgba(0,230,118,0.5)" strokeWidth="1.5" strokeDasharray="6 4" className="car-aim-ring"/>
+                )}
                 {/* Tick marks */}
                 <line x1="100" y1="35" x2="100" y2="42" stroke="rgba(0,230,118,0.4)" strokeWidth="1"/>
                 <line x1="100" y1="158" x2="100" y2="165" stroke="rgba(0,230,118,0.4)" strokeWidth="1"/>
@@ -1077,15 +1224,43 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               </svg>
             </div>
 
+            {/* Surface mode selector */}
+            <div className="car-mode-selector">
+              <button
+                className={`car-mode-btn ${surfaceMode === 'floor' ? 'car-mode-active' : ''}`}
+                onClick={() => updateSurfaceMode('floor')}
+              >
+                ⬇ Floor
+              </button>
+              <button
+                className={`car-mode-btn ${surfaceMode === 'wall' ? 'car-mode-active' : ''}`}
+                onClick={() => updateSurfaceMode('wall')}
+              >
+                ◧ Wall
+              </button>
+              <button
+                className={`car-mode-btn ${surfaceMode === 'ceiling' ? 'car-mode-active' : ''}`}
+                onClick={() => updateSurfaceMode('ceiling')}
+              >
+                ⬆ Ceiling
+              </button>
+            </div>
+
             <div className="car-scan-hud">
               <div className="car-scan-pill">
                 <div className="car-pulse-dot" />
-                <span ref={surfaceTextRef}>Move slowly to scan...</span>
+                <span ref={surfaceTextRef}>
+                  {surfaceMode === 'floor' ? 'Move slowly to scan...' : surfaceMode === 'wall' ? '◧ Point at wall and tap to place' : '⬆ Point at ceiling and tap to place'}
+                </span>
               </div>
               <p className="car-scan-hint">
-                Point camera at a surface and move slowly.
-                <br />
-                Tap when the reticle locks on.
+                {surfaceMode === 'floor' ? (
+                  <>Point camera at floor and move slowly.<br />Tap when the reticle locks on.</>
+                ) : surfaceMode === 'wall' ? (
+                  <>Point camera at a wall.<br />Tap to place — snaps to real wall if detected.</>
+                ) : (
+                  <>Point camera upward at ceiling.<br />Tap to place — snaps to real ceiling if detected.</>
+                )}
               </p>
             </div>
           </>
