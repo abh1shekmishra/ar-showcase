@@ -4,21 +4,19 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import './CustomAR.css';
 
-// Median filter: returns median of a sorted copy of the array
+// Median of a numeric array
 const median = (arr) => {
-  const sorted = [...arr].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 !== 0
-    ? sorted[mid]
-    : (sorted[mid - 1] + sorted[mid]) / 2;
+  const s = [...arr].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
 const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const containerRef = useRef(null);
   const overlayRef = useRef(null);
 
-  // ── Refs for render-loop access (React state is stale inside rAF) ──
-  const phaseRef = useRef('loading'); // loading → ready → scanning → placed
+  // ── Core refs ──
+  const phaseRef = useRef('loading');
   const modelGroupRef = useRef(null);
   const reticleRef = useRef(null);
   const hitTestSourceRef = useRef(null);
@@ -27,52 +25,54 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const sceneRef = useRef(null);
   const cameraRef = useRef(null);
   const localSpaceRef = useRef(null);
-  const scaleRef = useRef(1);
-  const rotationRef = useRef(0);
-  const heightRef = useRef(0);
-  const placedPosRef = useRef(new THREE.Vector3());
   const shadowPlaneRef = useRef(null);
   const dirLightRef = useRef(null);
   const ambientRef = useRef(null);
   const cancelledRef = useRef(false);
+  const anchorRef = useRef(null);
 
-  // Smoothing: lerp targets for reticle to eliminate jitter
-  const reticlePosTarget = useRef(new THREE.Vector3());
-  const reticleQuatTarget = useRef(new THREE.Quaternion());
+  // Transform refs (updated by touch gestures + render loop reads these)
+  const scaleRef = useRef(1);
+  const rotationRef = useRef(0);
+  const heightRef = useRef(0);
+  const placedPosRef = useRef(new THREE.Vector3());
+
+  // Reticle smoothing
   const reticlePosSmoothed = useRef(new THREE.Vector3());
   const reticleQuatSmoothed = useRef(new THREE.Quaternion());
   const reticleHasFirstPose = useRef(false);
-  const lastFrameTime = useRef(0); // for frame-rate independent smoothing
+  const lastFrameTime = useRef(0);
 
-  // Hit-test outlier rejection: rolling buffer of recent positions
-  const HIT_BUFFER_SIZE = 7;
-  const hitPosBuffer = useRef([]); // array of THREE.Vector3
-  const hitQuatBuffer = useRef([]); // array of THREE.Quaternion
+  // Outlier rejection buffer
+  const HIT_BUFFER_SIZE = 5;
+  const hitPosBuffer = useRef([]);
+  const hitQuatBuffer = useRef([]);
 
-  // XR anchor for drift-proof placement
-  const anchorRef = useRef(null);
-
-  // Tracking quality
+  // Tracking
   const lastHitTime = useRef(0);
   const consecutiveHits = useRef(0);
-  const surfaceConfidence = useRef(0); // 0-1
 
-  // ── UI state ──
-  const [phase, setPhase] = useState('loading'); // loading | ready | scanning | placed
+  // Touch gesture tracking
+  const touchStartDist = useRef(0);
+  const touchStartAngle = useRef(0);
+  const touchStartScale = useRef(1);
+  const touchStartRot = useRef(0);
+  const singleTouchStartY = useRef(0);
+  const singleTouchStartHeight = useRef(0);
+  const activeTouches = useRef(0);
+
+  // Throttle UI updates
+  const lastUIUpdate = useRef(0);
+  const surfaceInfoRef = useRef('');
+
+  // ── UI state (minimal — only for phase transitions + errors) ──
+  const [phase, setPhase] = useState('loading');
   const [surfaceInfo, setSurfaceInfo] = useState('');
-  const [arScale, setArScale] = useState(1);
-  const [arRotation, setArRotation] = useState(0);
-  const [arHeight, setArHeight] = useState(0);
   const [error, setError] = useState(null);
   const [loadProgress, setLoadProgress] = useState(0);
-  const [trackingStatus, setTrackingStatus] = useState('good'); // good | limited | lost
+  const [gestureHint, setGestureHint] = useState('');
 
   const isCeiling = modelCategory === 'Ceiling Lamps' || modelCategory === 'Chandeliers';
-
-  // Sync state → refs for render loop
-  useEffect(() => { scaleRef.current = arScale; }, [arScale]);
-  useEffect(() => { rotationRef.current = arRotation; }, [arRotation]);
-  useEffect(() => { heightRef.current = arHeight; }, [arHeight]);
 
   const updatePhase = useCallback((p) => {
     phaseRef.current = p;
@@ -80,38 +80,82 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   }, []);
 
   // ══════════════════════════════════════════════════════════════
-  // PHASE 1: On mount — set up Three.js scene + load model
-  //          (NO XR session here — that needs user activation)
+  // TOUCH GESTURE HANDLERS (pinch-scale, two-finger-rotate, drag-height)
+  // ══════════════════════════════════════════════════════════════
+  const handleTouchStart = useCallback((e) => {
+    if (phaseRef.current !== 'placed') return;
+    activeTouches.current = e.touches.length;
+
+    if (e.touches.length === 2) {
+      // Pinch + rotate: record initial distance and angle
+      const dx = e.touches[1].clientX - e.touches[0].clientX;
+      const dy = e.touches[1].clientY - e.touches[0].clientY;
+      touchStartDist.current = Math.hypot(dx, dy);
+      touchStartAngle.current = Math.atan2(dy, dx);
+      touchStartScale.current = scaleRef.current;
+      touchStartRot.current = rotationRef.current;
+    } else if (e.touches.length === 1) {
+      // Single finger: vertical drag for height
+      singleTouchStartY.current = e.touches[0].clientY;
+      singleTouchStartHeight.current = heightRef.current;
+    }
+  }, []);
+
+  const handleTouchMove = useCallback((e) => {
+    if (phaseRef.current !== 'placed') return;
+
+    if (e.touches.length === 2) {
+      const dx = e.touches[1].clientX - e.touches[0].clientX;
+      const dy = e.touches[1].clientY - e.touches[0].clientY;
+      const dist = Math.hypot(dx, dy);
+      const angle = Math.atan2(dy, dx);
+
+      // Pinch → scale
+      if (touchStartDist.current > 0) {
+        const ratio = dist / touchStartDist.current;
+        scaleRef.current = Math.max(0.1, Math.min(5, touchStartScale.current * ratio));
+      }
+
+      // Two-finger twist → rotation
+      const angleDelta = (angle - touchStartAngle.current) * (180 / Math.PI);
+      rotationRef.current = touchStartRot.current + angleDelta;
+    } else if (e.touches.length === 1 && activeTouches.current === 1) {
+      // Single finger vertical drag → height
+      const deltaY = singleTouchStartY.current - e.touches[0].clientY;
+      const heightDelta = deltaY * 0.005; // 5mm per pixel
+      heightRef.current = singleTouchStartHeight.current + heightDelta;
+      heightRef.current = Math.max(-3, Math.min(5, heightRef.current));
+    }
+  }, []);
+
+  const handleTouchEnd = useCallback((e) => {
+    activeTouches.current = e.touches.length;
+  }, []);
+
+  // ══════════════════════════════════════════════════════════════
+  // PHASE 1: Mount — set up Three.js + load model (no XR yet)
   // ══════════════════════════════════════════════════════════════
   useEffect(() => {
     cancelledRef.current = false;
 
     const setup = async () => {
-      // ── 1. Check WebXR support ──
       if (!navigator.xr) {
         setError('WebXR is not available. Use Chrome 79+ on Android.');
         return;
       }
-
       try {
-        const isSupported = await navigator.xr.isSessionSupported('immersive-ar');
-        if (!isSupported) {
-          setError('AR is not supported on this device/browser. Use Chrome on Android.');
-          return;
-        }
+        const ok = await navigator.xr.isSessionSupported('immersive-ar');
+        if (!ok) { setError('AR not supported. Use Chrome on Android.'); return; }
       } catch {
-        setError('Could not check AR support. Use Chrome on Android.');
-        return;
+        setError('Could not check AR support.'); return;
       }
 
       try {
-        // ── 2. Three.js renderer ──
+        // Renderer
         const renderer = new THREE.WebGLRenderer({
-          alpha: true,
-          antialias: true,
-          powerPreference: 'high-performance',
+          alpha: true, antialias: true, powerPreference: 'high-performance',
         });
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // cap for perf
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.xr.enabled = true;
         renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -123,13 +167,10 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
         const scene = new THREE.Scene();
         sceneRef.current = scene;
-
-        const camera = new THREE.PerspectiveCamera(
-          70, window.innerWidth / window.innerHeight, 0.01, 40
-        );
+        const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 40);
         cameraRef.current = camera;
 
-        // ── 3. Lighting (will be adjusted by light estimation if available) ──
+        // Lighting
         const ambient = new THREE.AmbientLight(0xffffff, 1.0);
         scene.add(ambient);
         ambientRef.current = ambient;
@@ -137,8 +178,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
         dirLight.position.set(1, 4, 2);
         dirLight.castShadow = true;
-        dirLight.shadow.mapSize.width = 1024;
-        dirLight.shadow.mapSize.height = 1024;
+        dirLight.shadow.mapSize.set(1024, 1024);
         dirLight.shadow.camera.near = 0.1;
         dirLight.shadow.camera.far = 15;
         dirLight.shadow.camera.left = -3;
@@ -150,7 +190,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         scene.add(dirLight);
         dirLightRef.current = dirLight;
 
-        // Shadow-catching plane
+        // Shadow plane
         const shadowPlane = new THREE.Mesh(
           new THREE.PlaneGeometry(20, 20),
           new THREE.ShadowMaterial({ opacity: 0.35 })
@@ -161,459 +201,273 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         scene.add(shadowPlane);
         shadowPlaneRef.current = shadowPlane;
 
-        // ── 4. Reticle — stabilized green ring ──
+        // Reticle
         const reticle = new THREE.Group();
-
-        // Outer ring
         const outerRing = new THREE.Mesh(
           new THREE.RingGeometry(0.09, 0.11, 64),
           new THREE.MeshBasicMaterial({ color: 0x00e676, side: THREE.DoubleSide })
         );
         outerRing.rotation.x = -Math.PI / 2;
         reticle.add(outerRing);
-
-        // Inner ring
-        const innerRing = new THREE.Mesh(
-          new THREE.RingGeometry(0.04, 0.05, 64),
-          new THREE.MeshBasicMaterial({
-            color: 0x00e676, side: THREE.DoubleSide,
-            transparent: true, opacity: 0.4,
-          })
-        );
-        innerRing.rotation.x = -Math.PI / 2;
-        reticle.add(innerRing);
-
-        // Center dot
-        const centerDot = new THREE.Mesh(
-          new THREE.CircleGeometry(0.012, 24),
+        const innerDot = new THREE.Mesh(
+          new THREE.CircleGeometry(0.015, 24),
           new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide })
         );
-        centerDot.rotation.x = -Math.PI / 2;
-        reticle.add(centerDot);
-
+        innerDot.rotation.x = -Math.PI / 2;
+        reticle.add(innerDot);
         reticle.visible = false;
         scene.add(reticle);
         reticleRef.current = reticle;
 
-        // ── 5. Load model ──
-        const dracoLoader = new DRACOLoader();
-        dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
-
-        const gltfLoader = new GLTFLoader();
-        gltfLoader.setDRACOLoader(dracoLoader);
-
+        // Load model
+        const draco = new DRACOLoader();
+        draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+        const loader = new GLTFLoader();
+        loader.setDRACOLoader(draco);
         setLoadProgress(5);
 
         const gltf = await new Promise((resolve, reject) => {
-          gltfLoader.load(
-            modelSrc,
-            (g) => resolve(g),
-            (progress) => {
-              if (progress.total > 0) {
-                setLoadProgress(5 + Math.round((progress.loaded / progress.total) * 85));
-              }
-            },
-            (err) => reject(err)
+          loader.load(modelSrc,
+            g => resolve(g),
+            p => { if (p.total > 0) setLoadProgress(5 + Math.round((p.loaded / p.total) * 85)); },
+            err => reject(err)
           );
         });
-
         if (cancelledRef.current) return;
         setLoadProgress(95);
 
         const model = gltf.scene;
-
-        // Enable shadows + fix materials
-        model.traverse((child) => {
-          if (child.isMesh) {
-            child.castShadow = true;
-            child.receiveShadow = true;
-            // Ensure proper material encoding
-            if (child.material) {
-              child.material.needsUpdate = true;
-            }
-          }
+        model.traverse(c => {
+          if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; }
         });
 
-        // Center model on bounding box, put bottom at y=0
+        // Center + bottom at y=0
         const box = new THREE.Box3().setFromObject(model);
         const center = box.getCenter(new THREE.Vector3());
         const size = box.getSize(new THREE.Vector3());
         model.position.sub(center);
         model.position.y += size.y / 2;
 
-        // Auto-scale if out of range (real-world meters)
+        // Auto-scale
         const maxDim = Math.max(size.x, size.y, size.z);
-        if (maxDim > 4) {
-          model.scale.multiplyScalar(1.5 / maxDim);
-        } else if (maxDim < 0.03) {
-          model.scale.multiplyScalar(0.3 / maxDim);
-        }
+        if (maxDim > 4) model.scale.multiplyScalar(1.5 / maxDim);
+        else if (maxDim < 0.03) model.scale.multiplyScalar(0.3 / maxDim);
 
-        // Ceiling fixtures: flip upside down
-        if (isCeiling) {
-          model.rotation.x = Math.PI;
-        }
+        if (isCeiling) model.rotation.x = Math.PI;
 
-        const modelGroup = new THREE.Group();
-        modelGroup.add(model);
-        modelGroup.visible = false;
-        scene.add(modelGroup);
-        modelGroupRef.current = modelGroup;
+        const group = new THREE.Group();
+        group.add(model);
+        group.visible = false;
+        scene.add(group);
+        modelGroupRef.current = group;
 
         setLoadProgress(100);
-
-        // Model loaded — show "Enter AR" button (phase: ready)
         updatePhase('ready');
-
       } catch (err) {
-        console.error('Model load error:', err);
         setError(`Failed to load model: ${err.message || 'Unknown error'}`);
       }
     };
 
     setup();
-
     return () => {
       cancelledRef.current = true;
-      if (anchorRef.current) {
-        try { anchorRef.current.delete(); } catch {}
-        anchorRef.current = null;
-      }
-      if (sessionRef.current) {
-        sessionRef.current.end().catch(() => {});
-        sessionRef.current = null;
-      }
-      if (rendererRef.current) {
-        rendererRef.current.setAnimationLoop(null);
-        rendererRef.current.dispose();
-        rendererRef.current = null;
-      }
+      if (anchorRef.current) { try { anchorRef.current.delete(); } catch {} }
+      if (sessionRef.current) { sessionRef.current.end().catch(() => {}); sessionRef.current = null; }
+      if (rendererRef.current) { rendererRef.current.setAnimationLoop(null); rendererRef.current.dispose(); rendererRef.current = null; }
     };
   }, [modelSrc, isCeiling, updatePhase]);
 
   // ══════════════════════════════════════════════════════════════
-  // PHASE 2: "Enter AR" button click — requestSession (user gesture!)
+  // PHASE 2: "Enter AR" — user gesture starts XR session
   // ══════════════════════════════════════════════════════════════
   const startARSession = useCallback(async () => {
     const renderer = rendererRef.current;
     const scene = sceneRef.current;
     const camera = cameraRef.current;
-    if (!renderer || !scene || !camera) {
-      setError('Scene not initialized.');
-      return;
-    }
+    if (!renderer || !scene || !camera) { setError('Scene not initialized.'); return; }
 
     try {
-      updatePhase('loading'); // brief transition
+      updatePhase('loading');
+      if (containerRef.current) containerRef.current.appendChild(renderer.domElement);
 
-      // Append canvas
-      if (containerRef.current) {
-        containerRef.current.appendChild(renderer.domElement);
-      }
-
-      // ── Request XR session (MUST be in user-gesture call stack) ──
       const sessionInit = {
         requiredFeatures: ['hit-test'],
         optionalFeatures: ['dom-overlay', 'light-estimation', 'anchors'],
       };
-      if (overlayRef.current) {
-        sessionInit.domOverlay = { root: overlayRef.current };
-      }
+      if (overlayRef.current) sessionInit.domOverlay = { root: overlayRef.current };
 
       const session = await navigator.xr.requestSession('immersive-ar', sessionInit);
       sessionRef.current = session;
-
       renderer.xr.setReferenceSpaceType('local');
       await renderer.xr.setSession(session);
 
-      // ── Reference spaces ──
       const viewerSpace = await session.requestReferenceSpace('viewer');
       const localSpace = await session.requestReferenceSpace('local');
       localSpaceRef.current = localSpace;
 
-      // ── Hit-test source ──
-      let hitTestSource;
-      try {
-        hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-        hitTestSourceRef.current = hitTestSource;
-      } catch (htErr) {
-        console.warn('Hit-test source failed, retrying...', htErr);
-        // Retry once after brief delay
-        await new Promise(r => setTimeout(r, 500));
-        hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-        hitTestSourceRef.current = hitTestSource;
-      }
+      const hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+      hitTestSourceRef.current = hitTestSource;
 
-      // ── Light estimation (if supported) ──
       let lightProbe = null;
-      try {
-        lightProbe = await session.requestLightProbe();
-      } catch {
-        // light estimation not available — use static lighting
-      }
+      try { lightProbe = await session.requestLightProbe(); } catch {}
 
       updatePhase('scanning');
 
-      // ── Session lifecycle ──
       session.addEventListener('end', () => {
         hitTestSourceRef.current = null;
         sessionRef.current = null;
         if (!cancelledRef.current) onClose();
       });
 
-      // Re-request hit-test if it gets lost during session
-      // XRHitTestSource doesn't support addEventListener — we detect
-      // loss by checking for null results in the render loop instead.
-
-      // ── Visibility change: handle tab switch / lock screen ──
-      session.addEventListener('visibilitychange', () => {
-        if (session.visibilityState === 'hidden') {
-          setTrackingStatus('lost');
-        } else {
-          setTrackingStatus('limited');
-          // Tracking will recover — consecutive hits will restore 'good'
-        }
-      });
-
-      // ── TAP handler: place or reposition ──
+      // TAP = place model (scanning only, NOT in placed mode)
       session.addEventListener('select', (event) => {
-        const currentPhase = phaseRef.current;
-        const ret = reticleRef.current;
-        const xrFrame = event.frame;
-
-        // Scanning: place model at reticle
-        if (currentPhase === 'scanning' && ret && ret.visible) {
-          placeModelAtReticle(xrFrame);
-        }
-        // Already placed: reposition (tap to move)
-        else if (currentPhase === 'placed' && ret && ret.visible) {
-          placeModelAtReticle(xrFrame);
+        if (phaseRef.current === 'scanning' && reticleRef.current && reticleRef.current.visible) {
+          placeModelAtReticle(event.frame, localSpace);
         }
       });
 
-      // ── Render loop ──
-      // Smoothing constant: higher = snappier, lower = smoother
-      // Using frame-rate independent formula: 1 - e^(-speed * dt)
-      const SMOOTH_SPEED = 12; // ~0.25 at 60fps, adapts to any frame rate
+      // Touch gestures on overlay
+      const overlay = overlayRef.current;
+      if (overlay) {
+        overlay.addEventListener('touchstart', handleTouchStart, { passive: true });
+        overlay.addEventListener('touchmove', handleTouchMove, { passive: true });
+        overlay.addEventListener('touchend', handleTouchEnd, { passive: true });
+      }
+
+      const SMOOTH_SPEED = 14;
 
       renderer.setAnimationLoop((timestamp, frame) => {
         if (cancelledRef.current || !frame) return;
 
-        // ── Frame-rate independent delta time ──
         const now = performance.now();
-        const dt = lastFrameTime.current > 0
-          ? Math.min((now - lastFrameTime.current) / 1000, 0.1) // cap at 100ms
-          : 0.016; // assume 60fps on first frame
+        const dt = lastFrameTime.current > 0 ? Math.min((now - lastFrameTime.current) / 1000, 0.1) : 0.016;
         lastFrameTime.current = now;
-
-        const lerpAlpha = 1 - Math.exp(-SMOOTH_SPEED * dt);
+        const alpha = 1 - Math.exp(-SMOOTH_SPEED * dt);
 
         const currentPhase = phaseRef.current;
         const ret = reticleRef.current;
         const mg = modelGroupRef.current;
 
-        // ── Light estimation: update scene lighting from real world ──
+        // Light estimation
         if (lightProbe && frame.getLightEstimate) {
           try {
-            const estimate = frame.getLightEstimate(lightProbe);
-            if (estimate) {
-              const intensity = estimate.primaryLightIntensity;
-              if (intensity) {
-                const lum = Math.max(intensity.x, intensity.y, intensity.z);
-                if (ambientRef.current) {
-                  // Smooth light changes to avoid flickering
-                  const targetAmbient = Math.min(lum * 0.6, 2.5);
-                  ambientRef.current.intensity += (targetAmbient - ambientRef.current.intensity) * lerpAlpha * 0.3;
-                }
+            const est = frame.getLightEstimate(lightProbe);
+            if (est) {
+              const pi = est.primaryLightIntensity;
+              if (pi) {
+                const lum = Math.max(pi.x, pi.y, pi.z);
+                if (ambientRef.current) ambientRef.current.intensity += (Math.min(lum * 0.6, 2.5) - ambientRef.current.intensity) * alpha * 0.2;
                 if (dirLightRef.current) {
-                  const targetDir = Math.min(lum * 0.8, 3.0);
-                  dirLightRef.current.intensity += (targetDir - dirLightRef.current.intensity) * lerpAlpha * 0.3;
-                  dirLightRef.current.color.lerp(
-                    new THREE.Color(
-                      intensity.x / (lum || 1),
-                      intensity.y / (lum || 1),
-                      intensity.z / (lum || 1)
-                    ),
-                    lerpAlpha * 0.3
-                  );
+                  dirLightRef.current.intensity += (Math.min(lum * 0.8, 3.0) - dirLightRef.current.intensity) * alpha * 0.2;
                 }
               }
-              const dir = estimate.primaryLightDirection;
-              if (dir && dirLightRef.current && mg && mg.visible) {
-                dirLightRef.current.position.set(
-                  mg.position.x - dir.x * 4,
-                  mg.position.y - dir.y * 4 + 2,
-                  mg.position.z - dir.z * 4
-                );
-              }
             }
-          } catch {
-            // Ignore light estimation errors
-          }
+          } catch {}
         }
 
-        // ── Update model from anchor (drift correction) ──
-        if (currentPhase === 'placed' && anchorRef.current && mg) {
-          try {
-            const anchorPose = frame.getPose(anchorRef.current.anchorSpace, localSpace);
-            if (anchorPose) {
-              const aPos = anchorPose.transform.position;
-              // Smoothly correct any drift between anchor and placed position
-              placedPosRef.current.x += (aPos.x - placedPosRef.current.x) * lerpAlpha;
-              placedPosRef.current.z += (aPos.z - placedPosRef.current.z) * lerpAlpha;
-              // Don't correct Y from anchor — user controls height
-              mg.position.x = placedPosRef.current.x;
-              mg.position.z = placedPosRef.current.z;
-            }
-          } catch {
-            // Anchor pose unavailable this frame — no correction
-          }
-        }
-
-        // ── Hit-test: scanning or placed (for repositioning) ──
-        if (currentPhase === 'scanning' || currentPhase === 'placed') {
+        // ── SCANNING: hit-test + reticle ──
+        if (currentPhase === 'scanning') {
           const hts = hitTestSourceRef.current;
           if (hts) {
             const results = frame.getHitTestResults(hts);
-
             if (results.length > 0 && ret) {
-              const hit = results[0];
-              const pose = hit.getPose(localSpaceRef.current);
-
+              const pose = results[0].getPose(localSpaceRef.current);
               if (pose) {
                 lastHitTime.current = now;
                 consecutiveHits.current++;
-                surfaceConfidence.current = Math.min(1, consecutiveHits.current / 15);
 
-                // Extract position + rotation from hit pose
                 const m4 = new THREE.Matrix4().fromArray(pose.transform.matrix);
                 const rawPos = new THREE.Vector3();
                 const rawQuat = new THREE.Quaternion();
-                const rawScale = new THREE.Vector3();
-                m4.decompose(rawPos, rawQuat, rawScale);
+                const rawSc = new THREE.Vector3();
+                m4.decompose(rawPos, rawQuat, rawSc);
 
-                // ── Outlier rejection: median filter on rolling buffer ──
-                const posBuf = hitPosBuffer.current;
-                const quatBuf = hitQuatBuffer.current;
-                posBuf.push(rawPos.clone());
-                quatBuf.push(rawQuat.clone());
-                if (posBuf.length > HIT_BUFFER_SIZE) posBuf.shift();
-                if (quatBuf.length > HIT_BUFFER_SIZE) quatBuf.shift();
+                // Median filter
+                const pb = hitPosBuffer.current;
+                const qb = hitQuatBuffer.current;
+                pb.push(rawPos.clone());
+                qb.push(rawQuat.clone());
+                if (pb.length > HIT_BUFFER_SIZE) pb.shift();
+                if (qb.length > HIT_BUFFER_SIZE) qb.shift();
 
-                let filteredPos = rawPos;
-                let filteredQuat = rawQuat;
-
-                if (posBuf.length >= 3) {
-                  // Median of each axis independently (rejects single-frame spikes)
-                  const medX = median(posBuf.map(p => p.x));
-                  const medY = median(posBuf.map(p => p.y));
-                  const medZ = median(posBuf.map(p => p.z));
-                  filteredPos = new THREE.Vector3(medX, medY, medZ);
-
-                  // For quaternion: use the buffer entry closest to the median position
-                  // (pure median of quaternion components isn't valid)
-                  let bestIdx = 0;
-                  let bestDist = Infinity;
-                  for (let i = 0; i < posBuf.length; i++) {
-                    const d = posBuf[i].distanceToSquared(filteredPos);
-                    if (d < bestDist) { bestDist = d; bestIdx = i; }
-                  }
-                  filteredQuat = quatBuf[bestIdx];
+                let fPos = rawPos, fQuat = rawQuat;
+                if (pb.length >= 3) {
+                  fPos = new THREE.Vector3(median(pb.map(p => p.x)), median(pb.map(p => p.y)), median(pb.map(p => p.z)));
+                  let bi = 0, bd = Infinity;
+                  for (let i = 0; i < pb.length; i++) { const d = pb[i].distanceToSquared(fPos); if (d < bd) { bd = d; bi = i; } }
+                  fQuat = qb[bi];
                 }
 
-                reticlePosTarget.current.copy(filteredPos);
-                reticleQuatTarget.current.copy(filteredQuat);
-
-                // First hit: snap immediately
                 if (!reticleHasFirstPose.current) {
-                  reticlePosSmoothed.current.copy(filteredPos);
-                  reticleQuatSmoothed.current.copy(filteredQuat);
+                  reticlePosSmoothed.current.copy(fPos);
+                  reticleQuatSmoothed.current.copy(fQuat);
                   reticleHasFirstPose.current = true;
                 } else {
-                  // Frame-rate independent lerp
-                  reticlePosSmoothed.current.lerp(reticlePosTarget.current, lerpAlpha);
-                  reticleQuatSmoothed.current.slerp(reticleQuatTarget.current, lerpAlpha);
+                  reticlePosSmoothed.current.lerp(fPos, alpha);
+                  reticleQuatSmoothed.current.slerp(fQuat, alpha);
                 }
 
-                // Apply smoothed transform
                 ret.position.copy(reticlePosSmoothed.current);
                 ret.quaternion.copy(reticleQuatSmoothed.current);
+                ret.visible = true;
 
-                // Show reticle
-                if (currentPhase === 'scanning') {
-                  ret.visible = true;
-                } else if (currentPhase === 'placed') {
-                  ret.visible = true;
-                  ret.children.forEach(c => {
-                    if (c.material) c.material.opacity = 0.3;
-                  });
+                // Pulse
+                const pulse = 0.9 + 0.15 * Math.sin(now * 0.004);
+                ret.scale.set(pulse, pulse, pulse);
+
+                // Throttled surface info (max 2x/sec)
+                if (now - lastUIUpdate.current > 500) {
+                  lastUIUpdate.current = now;
+                  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(fQuat);
+                  let info;
+                  if (up.y > 0.7) info = 'Floor detected — tap to place';
+                  else if (up.y < -0.7) info = 'Ceiling detected — tap to place';
+                  else info = 'Wall detected — tap to place';
+                  if (info !== surfaceInfoRef.current) {
+                    surfaceInfoRef.current = info;
+                    setSurfaceInfo(info);
+                  }
                 }
-
-                // Surface type detection from normal
-                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(filteredQuat);
-                if (Math.abs(up.y) > 0.7) {
-                  setSurfaceInfo(up.y > 0 ? 'Floor detected — tap to place' : 'Ceiling detected — tap to place');
-                } else {
-                  setSurfaceInfo('Wall detected — tap to place');
-                }
-
-                setTrackingStatus('good');
               }
             } else if (ret) {
               consecutiveHits.current = 0;
-              surfaceConfidence.current = 0;
-
-              // Don't hide reticle immediately — 300ms grace period
-              if (now - lastHitTime.current > 300) {
-                if (currentPhase === 'scanning') {
-                  ret.visible = false;
+              if (now - lastHitTime.current > 300) ret.visible = false;
+              if (now - lastUIUpdate.current > 500) {
+                lastUIUpdate.current = now;
+                if (surfaceInfoRef.current !== 'Scanning for surfaces...') {
+                  surfaceInfoRef.current = 'Scanning for surfaces...';
+                  setSurfaceInfo('Scanning for surfaces...');
                 }
-                setSurfaceInfo('Scanning for surfaces...');
-              }
-
-              if (now - lastHitTime.current > 3000) {
-                setTrackingStatus('limited');
-              }
-
-              // Re-request hit-test source if lost for 5+ seconds
-              if (now - lastHitTime.current > 5000 && !hitTestSourceRef.current) {
-                session.requestReferenceSpace('viewer').then(newVS => {
-                  return session.requestHitTestSource({ space: newVS });
-                }).then(newHts => {
-                  hitTestSourceRef.current = newHts;
-                }).catch(() => {
-                  // Still unavailable — will retry next cycle
-                });
               }
             }
           }
         }
 
-        // ── Pulsing reticle animation (scale by confidence) ──
-        if (ret && ret.visible && currentPhase === 'scanning') {
-          const t = now * 0.003;
-          const confidence = surfaceConfidence.current;
-          const baseScale = 0.8 + confidence * 0.2;
-          const pulse = baseScale + 0.15 * Math.sin(t);
-          ret.scale.set(pulse, pulse, pulse);
-          ret.children.forEach(c => {
-            if (c.material && c.material.opacity !== undefined) {
-              if (c === ret.children[1]) c.material.opacity = 0.4;
-              else c.material.opacity = 1;
-            }
-          });
-        }
-
-        // ── Apply live adjustments to placed model ──
+        // ── PLACED: apply gesture transforms, anchor drift correction ──
         if (currentPhase === 'placed' && mg) {
+          // Hide reticle completely in placed mode
+          if (ret) ret.visible = false;
+
           const s = scaleRef.current;
           mg.scale.set(s, s, s);
           mg.rotation.y = (rotationRef.current * Math.PI) / 180;
           mg.position.y = placedPosRef.current.y + heightRef.current;
 
-          if (shadowPlaneRef.current) {
-            shadowPlaneRef.current.position.y = placedPosRef.current.y;
+          // Anchor drift correction
+          if (anchorRef.current) {
+            try {
+              const ap = frame.getPose(anchorRef.current.anchorSpace, localSpace);
+              if (ap) {
+                const a = ap.transform.position;
+                placedPosRef.current.x += (a.x - placedPosRef.current.x) * alpha * 0.5;
+                placedPosRef.current.z += (a.z - placedPosRef.current.z) * alpha * 0.5;
+                mg.position.x = placedPosRef.current.x;
+                mg.position.z = placedPosRef.current.z;
+              }
+            } catch {}
           }
+
+          if (shadowPlaneRef.current) shadowPlaneRef.current.position.y = placedPosRef.current.y;
         }
 
         renderer.render(scene, camera);
@@ -621,95 +475,67 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
     } catch (err) {
       console.error('AR session error:', err);
       if (err.message && err.message.includes('user activation')) {
-        setError('Please tap the "Enter AR" button to start.');
-        updatePhase('ready');
+        setError('Please tap "Enter AR" to start.'); updatePhase('ready');
       } else {
         setError(err.message || 'Failed to start AR session.');
       }
     }
-  }, [onClose, updatePhase]);
+  }, [onClose, updatePhase, handleTouchStart, handleTouchMove, handleTouchEnd]);
 
-  // ── Place (or reposition) model at current reticle position ──
-  const placeModelAtReticle = useCallback((xrFrame) => {
+  // Place model at reticle
+  const placeModelAtReticle = useCallback((xrFrame, localSpace) => {
     const mg = modelGroupRef.current;
-    const ret = reticleRef.current;
-    if (!mg || !ret) return;
+    if (!mg) return;
 
     const pos = reticlePosSmoothed.current.clone();
     placedPosRef.current.copy(pos);
-
     mg.position.copy(pos);
     mg.visible = true;
 
-    // Shadow plane
+    // Reset gesture state
+    scaleRef.current = 1;
+    rotationRef.current = 0;
+    heightRef.current = 0;
+
     if (shadowPlaneRef.current) {
       shadowPlaneRef.current.position.set(pos.x, pos.y, pos.z);
       shadowPlaneRef.current.visible = true;
     }
+    if (dirLightRef.current) dirLightRef.current.target = mg;
 
-    // Light target
-    if (dirLightRef.current) {
-      dirLightRef.current.target = mg;
-    }
-
-    // Reset reticle opacity for placed mode
-    ret.children.forEach(c => {
-      if (c.material) c.material.opacity = 0.3;
-    });
-
-    // ── Create XR anchor for drift-proof placement ──
-    if (anchorRef.current) {
-      try { anchorRef.current.delete(); } catch {}
-      anchorRef.current = null;
-    }
-
-    if (xrFrame && xrFrame.createAnchor && localSpaceRef.current) {
+    // Create anchor
+    if (anchorRef.current) { try { anchorRef.current.delete(); } catch {} anchorRef.current = null; }
+    if (xrFrame && xrFrame.createAnchor && localSpace) {
       try {
-        const anchorPose = new XRRigidTransform(
+        const q = reticleQuatSmoothed.current;
+        const pose = new XRRigidTransform(
           { x: pos.x, y: pos.y, z: pos.z, w: 1 },
-          { x: reticleQuatSmoothed.current.x, y: reticleQuatSmoothed.current.y, z: reticleQuatSmoothed.current.z, w: reticleQuatSmoothed.current.w }
+          { x: q.x, y: q.y, z: q.z, w: q.w }
         );
-        xrFrame.createAnchor(anchorPose, localSpaceRef.current).then(anchor => {
-          anchorRef.current = anchor;
-        }).catch(() => {
-          // Anchors not supported — model works fine, just no drift correction
-        });
-      } catch {
-        // Anchors not available — graceful degradation
-      }
+        xrFrame.createAnchor(pose, localSpace).then(a => { anchorRef.current = a; }).catch(() => {});
+      } catch {}
     }
 
-    // Clear hit buffer for fresh data if user repositions
     hitPosBuffer.current = [];
     hitQuatBuffer.current = [];
+
+    // Show gesture hint briefly
+    setGestureHint('Pinch to resize • Twist to rotate • Drag to adjust height');
+    setTimeout(() => setGestureHint(''), 4000);
 
     updatePhase('placed');
   }, [updatePhase]);
 
-  // ── Exit ──
   const exitAR = useCallback(() => {
-    if (sessionRef.current) {
-      sessionRef.current.end().catch(() => {});
-    } else {
-      onClose();
-    }
+    if (sessionRef.current) sessionRef.current.end().catch(() => {});
+    else onClose();
   }, [onClose]);
 
   return (
     <div className="car-container" ref={containerRef}>
       <div className="car-overlay" ref={overlayRef}>
-        {/* Exit button */}
         <button className="car-exit" onClick={exitAR}>✕</button>
 
-        {/* Tracking indicator */}
-        {(phase === 'scanning' || phase === 'placed') && trackingStatus !== 'good' && (
-          <div className={`car-tracking car-tracking-${trackingStatus}`}>
-            {trackingStatus === 'limited' && '⚠ Limited tracking — move slowly'}
-            {trackingStatus === 'lost' && '✕ Tracking lost — return to the area'}
-          </div>
-        )}
-
-        {/* ── LOADING: Model loading ── */}
         {phase === 'loading' && !error && (
           <div className="car-loading">
             <div className="car-spinner" />
@@ -721,7 +547,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
           </div>
         )}
 
-        {/* ── READY: Model loaded — user must tap to start AR ── */}
         {phase === 'ready' && !error && (
           <div className="car-ready">
             <div className="car-ready-icon">✓</div>
@@ -736,7 +561,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
           </div>
         )}
 
-        {/* ── SCANNING: Surface detection HUD ── */}
         {phase === 'scanning' && (
           <div className="car-scan-hud">
             <div className="car-scan-pill">
@@ -744,77 +568,19 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               <span>{surfaceInfo || 'Scanning...'}</span>
             </div>
             <p className="car-scan-hint">
-              Point your camera at a flat surface.
+              Point camera at a floor, wall, or ceiling.
               <br />
-              Tap the green circle to place the model.
+              Tap the green circle to place.
             </p>
           </div>
         )}
 
-        {/* ── PLACED: Adjustment controls ── */}
-        {phase === 'placed' && (
-          <div className="car-controls">
-            <div className="car-badge">✓ Placed — tap surface to reposition</div>
-
-            <div className="car-panel">
-              {/* Height */}
-              <div className="car-row">
-                <span className="car-label">Height</span>
-                <button className="car-btn" onClick={() => setArHeight((h) => +(h - 0.1).toFixed(1))}>−</button>
-                <input
-                  type="range"
-                  min={isCeiling ? 0 : -2}
-                  max={isCeiling ? 4 : 2}
-                  step="0.05"
-                  value={arHeight}
-                  onChange={(e) => setArHeight(parseFloat(e.target.value))}
-                />
-                <button className="car-btn" onClick={() => setArHeight((h) => +(h + 0.1).toFixed(1))}>+</button>
-                <span className="car-val">{arHeight.toFixed(1)}m</span>
-              </div>
-
-              {/* Scale */}
-              <div className="car-row">
-                <span className="car-label">Scale</span>
-                <button className="car-btn" onClick={() => setArScale((s) => Math.max(0.1, +(s - 0.1).toFixed(1)))}>−</button>
-                <input
-                  type="range" min="0.1" max="3" step="0.05"
-                  value={arScale}
-                  onChange={(e) => setArScale(parseFloat(e.target.value))}
-                />
-                <button className="car-btn" onClick={() => setArScale((s) => Math.min(3, +(s + 0.1).toFixed(1)))}>+</button>
-                <span className="car-val">{arScale.toFixed(1)}x</span>
-              </div>
-
-              {/* Rotation */}
-              <div className="car-row">
-                <span className="car-label">Rotate</span>
-                <button className="car-btn" onClick={() => setArRotation((r) => r - 15)}>↺</button>
-                <input
-                  type="range" min="0" max="360" step="5"
-                  value={arRotation % 360}
-                  onChange={(e) => setArRotation(parseInt(e.target.value))}
-                />
-                <button className="car-btn" onClick={() => setArRotation((r) => r + 15)}>↻</button>
-                <span className="car-val">{arRotation % 360}°</span>
-              </div>
-
-              {/* Quick actions */}
-              <div className="car-actions">
-                <button onClick={() => { setArScale(1); setArRotation(0); setArHeight(0); }}>Reset</button>
-                {isCeiling && (
-                  <>
-                    <button onClick={() => setArHeight(2.4)}>2.4m</button>
-                    <button onClick={() => setArHeight(2.7)}>2.7m</button>
-                    <button onClick={() => setArHeight(3.0)}>3.0m</button>
-                  </>
-                )}
-              </div>
-            </div>
+        {phase === 'placed' && gestureHint && (
+          <div className="car-gesture-hint">
+            {gestureHint}
           </div>
         )}
 
-        {/* ── ERROR ── */}
         {error && (
           <div className="car-error">
             <p>{error}</p>
