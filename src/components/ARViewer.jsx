@@ -369,7 +369,7 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         src={modelSrc}
         alt="3D Model"
         ar
-        ar-modes="scene-viewer webxr quick-look"
+        ar-modes="webxr scene-viewer quick-look"
         ar-placement="floor"
         ar-scale="fixed"
         camera-controls
