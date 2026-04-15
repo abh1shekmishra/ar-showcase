@@ -361,20 +361,9 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         if (!cancelledRef.current) onClose();
       });
 
-      // Re-request hit-test if it gets cancelled (error recovery)
-      if (hitTestSource) {
-        hitTestSource.addEventListener('cancel', async () => {
-          console.warn('Hit-test source cancelled, re-requesting...');
-          hitTestSourceRef.current = null;
-          try {
-            const newViewerSpace = await session.requestReferenceSpace('viewer');
-            const newHts = await session.requestHitTestSource({ space: newViewerSpace });
-            hitTestSourceRef.current = newHts;
-          } catch (e) {
-            console.error('Failed to re-create hit-test source:', e);
-          }
-        });
-      }
+      // Re-request hit-test if it gets lost during session
+      // XRHitTestSource doesn't support addEventListener — we detect
+      // loss by checking for null results in the render loop instead.
 
       // ── Visibility change: handle tab switch / lock screen ──
       session.addEventListener('visibilitychange', () => {
@@ -584,6 +573,17 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
               if (now - lastHitTime.current > 3000) {
                 setTrackingStatus('limited');
+              }
+
+              // Re-request hit-test source if lost for 5+ seconds
+              if (now - lastHitTime.current > 5000 && !hitTestSourceRef.current) {
+                session.requestReferenceSpace('viewer').then(newVS => {
+                  return session.requestHitTestSource({ space: newVS });
+                }).then(newHts => {
+                  hitTestSourceRef.current = newHts;
+                }).catch(() => {
+                  // Still unavailable — will retry next cycle
+                });
               }
             }
           }
