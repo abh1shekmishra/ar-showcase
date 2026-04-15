@@ -6,6 +6,27 @@ import './CustomAR.css';
 
 const ENABLE_PLANE_VISUALIZATION = false;
 
+const classifySurface = (quaternion, upVector) => {
+  const up = upVector.set(0, 1, 0).applyQuaternion(quaternion);
+  if (up.y > 0.7) return 'floor';
+  if (up.y < -0.7) return 'ceiling';
+  return 'wall';
+};
+
+const pointInPolygonXZ = (polygon, x, z) => {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const zi = polygon[i].z;
+    const xj = polygon[j].x;
+    const zj = polygon[j].z;
+    const denom = Math.abs(zj - zi) < 1e-6 ? 1e-6 : (zj - zi);
+    const intersects = ((zi > z) !== (zj > z)) && (x < (((xj - xi) * (z - zi)) / denom) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+};
+
 const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const containerRef = useRef(null);
   const overlayRef = useRef(null);
@@ -72,6 +93,14 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const _tmpUp = useRef(new THREE.Vector3());
   const _tmpSurfaceNormal = useRef(new THREE.Vector3());
   const _tmpUserRotationQuat = useRef(new THREE.Quaternion());
+  const _rayOrigin = useRef(new THREE.Vector3());
+  const _rayDirection = useRef(new THREE.Vector3());
+  const _planeOrigin = useRef(new THREE.Vector3());
+  const _planeQuaternion = useRef(new THREE.Quaternion());
+  const _planeDelta = useRef(new THREE.Vector3());
+  const _planeIntersection = useRef(new THREE.Vector3());
+  const _planeLocalPoint = useRef(new THREE.Vector3());
+  const _planeLocalInverse = useRef(new THREE.Quaternion());
 
   // Pre-allocated hit buffer entries (avoid per-frame cloning)
   const _hitBufPos = useRef(Array.from({ length: 5 }, () => new THREE.Vector3()));
@@ -122,6 +151,63 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const updatePhase = useCallback((p) => {
     phaseRef.current = p;
     setPhase(p);
+  }, []);
+
+  const primeReticlePose = useCallback((position, quaternion, now = performance.now()) => {
+    _filteredPos.current.copy(position);
+    _filteredQuat.current.copy(quaternion);
+    reticlePosSmoothed.current.copy(position);
+    reticleQuatSmoothed.current.copy(quaternion);
+    reticleHasFirstPose.current = true;
+    lastHitTime.current = now;
+    consecutiveHits.current = Math.max(consecutiveHits.current, 1);
+    lastSurfaceTypeRef.current = classifySurface(quaternion, _tmpUp.current);
+  }, []);
+
+  const resolveVerticalPlaneFallbackPose = useCallback((frame, camera) => {
+    const detectedPlanes = frame.detectedPlanes;
+    const localSpace = localSpaceRef.current;
+    if (!detectedPlanes || !localSpace || !camera) return false;
+
+    camera.getWorldPosition(_rayOrigin.current);
+    camera.getWorldDirection(_rayDirection.current).normalize();
+
+    let found = false;
+    let bestDistance = Infinity;
+
+    for (const plane of detectedPlanes) {
+      if (plane.orientation !== 'vertical') continue;
+      const polygon = plane.polygon;
+      if (!polygon || polygon.length < 3) continue;
+
+      const planePose = frame.getPose(plane.planeSpace, localSpace);
+      if (!planePose) continue;
+
+      _tmpMat4.current.fromArray(planePose.transform.matrix);
+      _tmpMat4.current.decompose(_planeOrigin.current, _planeQuaternion.current, _tmpScale.current);
+
+      const planeNormal = _tmpSurfaceNormal.current.set(0, 1, 0).applyQuaternion(_planeQuaternion.current).normalize();
+      const denom = planeNormal.dot(_rayDirection.current);
+      if (Math.abs(denom) < 0.05) continue;
+
+      const distance = planeNormal.dot(_planeDelta.current.copy(_planeOrigin.current).sub(_rayOrigin.current)) / denom;
+      if (distance <= 0.05 || distance >= bestDistance) continue;
+
+      const intersection = _planeIntersection.current.copy(_rayDirection.current).multiplyScalar(distance).add(_rayOrigin.current);
+      const localPoint = _planeLocalPoint.current
+        .copy(intersection)
+        .sub(_planeOrigin.current)
+        .applyQuaternion(_planeLocalInverse.current.copy(_planeQuaternion.current).invert());
+
+      if (!pointInPolygonXZ(polygon, localPoint.x, localPoint.z)) continue;
+
+      _tmpPos.current.copy(intersection);
+      _tmpQuat.current.copy(_planeQuaternion.current);
+      bestDistance = distance;
+      found = true;
+    }
+
+    return found;
   }, []);
 
   const refreshAnchorAtPlacement = useCallback((xrFrame, localSpace) => {
@@ -484,12 +570,15 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
       const localSpace = await session.requestReferenceSpace('local');
       localSpaceRef.current = localSpace;
 
-      const hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+      const hitTestSource = await session.requestHitTestSource({ space: viewerSpace, entityTypes: ['plane'] });
       hitTestSourceRef.current = hitTestSource;
 
       // Transient input hit-test: detects surfaces where user taps (better for walls)
       try {
-        const transientSource = await session.requestHitTestSourceForTransientInput({ profile: 'generic-touchscreen' });
+        const transientSource = await session.requestHitTestSourceForTransientInput({
+          profile: 'generic-touchscreen',
+          entityTypes: ['plane'],
+        });
         transientHitSourceRef.current = transientSource;
       } catch {} // Not available on all devices
 
@@ -503,7 +592,34 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
       // TAP = place model (scanning only, NOT in placed mode)
       session.addEventListener('select', (event) => {
-        if (phaseRef.current === 'scanning' && reticleRef.current && reticleRef.current.visible) {
+        if (phaseRef.current !== 'scanning') return;
+
+        if (reticleRef.current && reticleRef.current.visible) {
+          placeModelAtReticle(event.frame, localSpace);
+          return;
+        }
+
+        if (transientHitSourceRef.current) {
+          const transientResults = event.frame.getHitTestResultsForTransientInput(transientHitSourceRef.current);
+          if (transientResults && transientResults.length > 0) {
+            for (let i = 0; i < transientResults.length; i++) {
+              const inputResults = transientResults[i].results;
+              if (!inputResults || inputResults.length === 0) continue;
+
+              const tappedPose = inputResults[0].getPose(localSpace);
+              if (!tappedPose) continue;
+
+              _tmpMat4.current.fromArray(tappedPose.transform.matrix);
+              _tmpMat4.current.decompose(_tmpPos.current, _tmpQuat.current, _tmpScale.current);
+              primeReticlePose(_tmpPos.current, _tmpQuat.current);
+              placeModelAtReticle(event.frame, localSpace);
+              return;
+            }
+          }
+        }
+
+        if (resolveVerticalPlaneFallbackPose(event.frame, cameraRef.current)) {
+          primeReticlePose(_tmpPos.current, _tmpQuat.current);
           placeModelAtReticle(event.frame, localSpace);
         }
       });
@@ -545,32 +661,44 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
           // Hit-test + median filter: every 2nd frame (halves XR API object allocations)
           // Reticle lerp runs every frame for smooth motion regardless
           if (fc & 1) {
-            let hitPose = null;
+            let hasPose = false;
 
             const hts = hitTestSourceRef.current;
             if (hts) {
               const results = frame.getHitTestResults(hts);
               if (results.length > 0) {
-                hitPose = results[0].getPose(localSpaceRef.current);
-              }
-            }
-
-            if (!hitPose && transientHitSourceRef.current) {
-              const transientResults = frame.getHitTestResultsForTransientInput(transientHitSourceRef.current);
-              if (transientResults && transientResults.length > 0) {
-                const inputResults = transientResults[0].results;
-                if (inputResults.length > 0) {
-                  hitPose = inputResults[0].getPose(localSpaceRef.current);
+                const pose = results[0].getPose(localSpaceRef.current);
+                if (pose) {
+                  _tmpMat4.current.fromArray(pose.transform.matrix);
+                  _tmpMat4.current.decompose(_tmpPos.current, _tmpQuat.current, _tmpScale.current);
+                  hasPose = true;
                 }
               }
             }
 
-            if (hitPose) {
+            if (!hasPose && transientHitSourceRef.current) {
+              const transientResults = frame.getHitTestResultsForTransientInput(transientHitSourceRef.current);
+              if (transientResults && transientResults.length > 0) {
+                for (let i = 0; i < transientResults.length && !hasPose; i++) {
+                  const inputResults = transientResults[i].results;
+                  if (!inputResults || inputResults.length === 0) continue;
+                  const pose = inputResults[0].getPose(localSpaceRef.current);
+                  if (pose) {
+                    _tmpMat4.current.fromArray(pose.transform.matrix);
+                    _tmpMat4.current.decompose(_tmpPos.current, _tmpQuat.current, _tmpScale.current);
+                    hasPose = true;
+                  }
+                }
+              }
+            }
+
+            if (!hasPose && resolveVerticalPlaneFallbackPose(frame, camera)) {
+              hasPose = true;
+            }
+
+            if (hasPose) {
               lastHitTime.current = now;
               consecutiveHits.current++;
-
-              _tmpMat4.current.fromArray(hitPose.transform.matrix);
-              _tmpMat4.current.decompose(_tmpPos.current, _tmpQuat.current, _tmpScale.current);
 
               // Ring buffer median filter (zero allocation)
               const bufPos = _hitBufPos.current;
@@ -650,11 +778,11 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               const stRef = surfaceTextRef.current;
               if (stRef) {
                 if (reticleHasFirstPose.current && now - lastHitTime.current <= 300) {
-                  const up = _tmpUp.current.set(0, 1, 0).applyQuaternion(_filteredQuat.current);
                   let info;
-                  if (up.y > 0.7) { info = '⬇ Floor detected — tap to place'; lastSurfaceTypeRef.current = 'floor'; }
-                  else if (up.y < -0.7) { info = '⬆ Ceiling detected — tap to place'; lastSurfaceTypeRef.current = 'ceiling'; }
-                  else { info = '◧ Wall detected — tap to place'; lastSurfaceTypeRef.current = 'wall'; }
+                  lastSurfaceTypeRef.current = classifySurface(_filteredQuat.current, _tmpUp.current);
+                  if (lastSurfaceTypeRef.current === 'floor') info = '⬇ Floor detected — tap to place';
+                  else if (lastSurfaceTypeRef.current === 'ceiling') info = '⬆ Ceiling detected — tap to place';
+                  else info = '◧ Wall detected — tap to place';
                   if (info !== surfaceInfoRef.current) { surfaceInfoRef.current = info; stRef.textContent = info; }
                 } else if (surfaceInfoRef.current !== 'Move slowly to scan surfaces...') {
                   surfaceInfoRef.current = 'Move slowly to scan surfaces...';
@@ -837,7 +965,15 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         setError(err.message || 'Failed to start AR session.');
       }
     }
-  }, [onClose, updatePhase, handleTouchStart, handleTouchMove, handleTouchEnd]);
+  }, [
+    onClose,
+    updatePhase,
+    handleTouchStart,
+    handleTouchMove,
+    handleTouchEnd,
+    primeReticlePose,
+    resolveVerticalPlaneFallbackPose,
+  ]);
 
   // Place model at reticle
   const placeModelAtReticle = useCallback((xrFrame, localSpace) => {
