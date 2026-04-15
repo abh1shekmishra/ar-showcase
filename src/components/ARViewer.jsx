@@ -385,7 +385,6 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         min-camera-orbit="auto auto 5%"
         max-camera-orbit="auto auto 500%"
         interpolation-decay="100"
-        xr-environment
         class="model-viewer"
       >
         {/* AR Button */}
@@ -399,53 +398,18 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
           View in AR
         </button>
 
-        {/* AR Prompt - Scanning overlay shown before model placement */}
-        <div id="ar-prompt" slot="ar-prompt">
-          <div className="ar-scan-overlay">
-            {/* Corner brackets */}
-            <div className="scan-frame">
-              <div className="scan-corner scan-corner-tl"></div>
-              <div className="scan-corner scan-corner-tr"></div>
-              <div className="scan-corner scan-corner-bl"></div>
-              <div className="scan-corner scan-corner-br"></div>
-              
-              {/* Animated scan line */}
-              <div className="scan-beam"></div>
-              
-              {/* Grid dots */}
-              <div className="scan-grid">
-                {Array.from({ length: 25 }).map((_, i) => (
-                  <div key={i} className="scan-dot" style={{ animationDelay: `${i * 0.08}s` }}></div>
-                ))}
-              </div>
-              
-              {/* Center reticle */}
-              <div className="scan-reticle">
-                <div className="reticle-ring"></div>
-                <div className="reticle-crosshair-h"></div>
-                <div className="reticle-crosshair-v"></div>
-                <div className="reticle-dot"></div>
-              </div>
-            </div>
-            
-            {/* Status text */}
-            <div className="scan-status">
-              <div className="scan-status-indicator">
-                <div className="scan-pulse"></div>
-                <span>Scanning</span>
-              </div>
-              <p className="scan-instruction">
-                Point your camera at any surface
-              </p>
-              <p className="scan-hint">Move slowly • Good lighting helps</p>
-              <p className="scan-tap-hint">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M9 11.24V7.5C9 6.12 10.12 5 11.5 5S14 6.12 14 7.5v3.74c1.21-.81 2-2.18 2-3.74C16 5.01 13.99 3 11.5 3S7 5.01 7 7.5c0 1.56.79 2.93 2 3.74zm9.84 4.63l-4.54-2.26c-.17-.07-.35-.11-.54-.11H13v-6c0-.83-.67-1.5-1.5-1.5S10 6.67 10 7.5v10.74l-3.43-.72c-.08-.01-.15-.03-.24-.03-.31 0-.59.13-.79.33l-.79.8 4.94 4.94c.27.27.65.44 1.06.44h6.79c.75 0 1.33-.55 1.44-1.28l.75-5.27c.01-.07.02-.14.02-.2 0-.62-.38-1.16-.91-1.38z"/>
-                </svg>
-                Tap to place model
-              </p>
-            </div>
-          </div>
+        {/* AR Prompt - shown during WebXR before model placement via CSS ar-status */}
+        <div id="ar-prompt">
+          <img 
+            src="https://modelviewer.dev/shared-assets/icons/hand.png" 
+            alt="Point your phone at a surface"
+          />
+        </div>
+
+        {/* AR tracking failure message */}
+        <div id="ar-failure">
+          AR is not tracking!<br/>
+          Move slowly and ensure good lighting.
         </div>
 
         {/* Loading Indicator */}
