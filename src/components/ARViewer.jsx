@@ -369,11 +369,11 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         src={modelSrc}
         alt="3D Model"
         ar
-        ar-modes="webxr scene-viewer quick-look"
-        ar-placement="floor wall ceiling"
+        ar-modes="scene-viewer webxr quick-look"
+        ar-placement="floor"
         ar-scale="fixed"
         camera-controls
-        touch-action="none"
+        touch-action="pan-y"
         shadow-intensity="2"
         shadow-softness="0.5"
         exposure={exposure}
