@@ -23,12 +23,16 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const ambientRef = useRef(null);
   const cancelledRef = useRef(false);
   const anchorRef = useRef(null);
+  const anchorRefreshPendingRef = useRef(false);
+  const anchorCreatePendingRef = useRef(false);
+  const anchorRevisionRef = useRef(0);
 
   // Transform refs (updated by touch gestures + render loop reads these)
   const scaleRef = useRef(1);
   const rotationRef = useRef(0);
   const heightRef = useRef(0);
   const placedPosRef = useRef(new THREE.Vector3());
+  const placementQuatRef = useRef(new THREE.Quaternion());
 
   // Reticle smoothing
   const reticlePosSmoothed = useRef(new THREE.Vector3());
@@ -64,6 +68,8 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const _tmpQuat = useRef(new THREE.Quaternion());
   const _tmpScale = useRef(new THREE.Vector3());
   const _tmpUp = useRef(new THREE.Vector3());
+  const _tmpSurfaceNormal = useRef(new THREE.Vector3());
+  const _tmpUserRotationQuat = useRef(new THREE.Quaternion());
 
   // Pre-allocated hit buffer entries (avoid per-frame cloning)
   const _hitBufPos = useRef(Array.from({ length: 5 }, () => new THREE.Vector3()));
@@ -116,6 +122,42 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
     setPhase(p);
   }, []);
 
+  const refreshAnchorAtPlacement = useCallback((xrFrame, localSpace) => {
+    anchorRefreshPendingRef.current = false;
+    if (!xrFrame?.createAnchor || !localSpace || anchorCreatePendingRef.current) return;
+
+    const previousAnchor = anchorRef.current;
+    const revision = anchorRevisionRef.current;
+    const position = placedPosRef.current;
+    const quaternion = placementQuatRef.current;
+
+    anchorRef.current = null;
+    anchorCreatePendingRef.current = true;
+
+    try {
+      const pose = new XRRigidTransform(
+        { x: position.x, y: position.y, z: position.z, w: 1 },
+        { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w }
+      );
+
+      xrFrame.createAnchor(pose, localSpace).then((nextAnchor) => {
+        anchorCreatePendingRef.current = false;
+        if (cancelledRef.current || revision !== anchorRevisionRef.current) {
+          try { nextAnchor.delete(); } catch {}
+          return;
+        }
+        if (previousAnchor) {
+          try { previousAnchor.delete(); } catch {}
+        }
+        anchorRef.current = nextAnchor;
+      }).catch(() => {
+        anchorCreatePendingRef.current = false;
+      });
+    } catch {
+      anchorCreatePendingRef.current = false;
+    }
+  }, []);
+
   // ══════════════════════════════════════════════════════════════
   // TOUCH GESTURE HANDLERS (pinch-scale, two-finger-rotate, drag-height)
   // ══════════════════════════════════════════════════════════════
@@ -137,6 +179,12 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
       singleTouchStartX.current = e.touches[0].clientX;
       singleTouchStartY.current = e.touches[0].clientY;
       isDraggingModel.current = true;
+      anchorRevisionRef.current += 1;
+      anchorRefreshPendingRef.current = false;
+      if (anchorRef.current) {
+        try { anchorRef.current.delete(); } catch {}
+        anchorRef.current = null;
+      }
     }
   }, []);
 
@@ -159,6 +207,9 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
       const angleDelta = (angle - touchStartAngle.current) * (180 / Math.PI);
       rotationRef.current = touchStartRot.current + angleDelta;
     } else if (e.touches.length === 1 && activeTouches.current === 1 && isDraggingModel.current) {
+      // Fallback drag when transient hit-test drag is unavailable on the device
+      if (transientHitSourceRef.current) return;
+
       // Single finger drag → move model in camera-relative XZ plane
       const deltaX = e.touches[0].clientX - singleTouchStartX.current;
       const deltaY = e.touches[0].clientY - singleTouchStartY.current;
@@ -190,7 +241,10 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
   const handleTouchEnd = useCallback((e) => {
     activeTouches.current = e.touches.length;
-    if (e.touches.length === 0) isDraggingModel.current = false;
+    if (e.touches.length === 0) {
+      isDraggingModel.current = false;
+      anchorRefreshPendingRef.current = true;
+    }
   }, []);
 
   // ══════════════════════════════════════════════════════════════
@@ -467,6 +521,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         capture.addEventListener('touchstart', handleTouchStart, { passive: true });
         capture.addEventListener('touchmove', handleTouchMove, { passive: true });
         capture.addEventListener('touchend', handleTouchEnd, { passive: true });
+        capture.addEventListener('touchcancel', handleTouchEnd, { passive: true });
       }
 
       const SMOOTH_SPEED = 14;
@@ -630,33 +685,74 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         if (currentPhase === 'placed' && mg) {
           if (ret) ret.visible = false;
 
+          if ((fc & 1) && isDraggingModel.current && transientHitSourceRef.current) {
+            const transientResults = frame.getHitTestResultsForTransientInput(transientHitSourceRef.current);
+            if (transientResults && transientResults.length > 0) {
+              let dragPose = null;
+              for (let i = 0; i < transientResults.length; i++) {
+                const inputResults = transientResults[i].results;
+                if (inputResults && inputResults.length > 0) {
+                  dragPose = inputResults[0].getPose(localSpaceRef.current);
+                  if (dragPose) break;
+                }
+              }
+
+              if (dragPose) {
+                _tmpMat4.current.fromArray(dragPose.transform.matrix);
+                _tmpMat4.current.decompose(_tmpPos.current, _tmpQuat.current, _tmpScale.current);
+                const dragAlpha = Math.min(1, alpha * 2.4);
+                placedPosRef.current.lerp(_tmpPos.current, dragAlpha);
+                placementQuatRef.current.slerp(_tmpQuat.current, dragAlpha);
+              }
+            }
+          }
+
           const s = scaleRef.current;
           mg.scale.set(s, s, s);
-          mg.rotation.y = (rotationRef.current * Math.PI) / 180;
+
+          const surfaceNormal = _tmpSurfaceNormal.current.set(0, 1, 0).applyQuaternion(placementQuatRef.current).normalize();
+          const userRotationQuat = _tmpUserRotationQuat.current.setFromAxisAngle(surfaceNormal, (rotationRef.current * Math.PI) / 180);
+          mg.quaternion.copy(placementQuatRef.current);
+          mg.quaternion.premultiply(userRotationQuat);
+
           mg.position.x = placedPosRef.current.x;
           mg.position.y = placedPosRef.current.y + heightRef.current;
           mg.position.z = placedPosRef.current.z;
 
+          if (!isDraggingModel.current && anchorRefreshPendingRef.current && !anchorCreatePendingRef.current) {
+            refreshAnchorAtPlacement(frame, localSpace);
+          }
+
           // Anchor drift correction — every 8th frame, only >5mm drift, gentle
-          if (fc % 8 === 0 && anchorRef.current && !isDraggingModel.current) {
+          if (fc % 8 === 0 && anchorRef.current && !isDraggingModel.current && !anchorRefreshPendingRef.current) {
             try {
               const ap = frame.getPose(anchorRef.current.anchorSpace, localSpace);
               if (ap) {
                 const a = ap.transform.position;
                 const dx = a.x - placedPosRef.current.x;
+                const dy = a.y - placedPosRef.current.y;
                 const dz = a.z - placedPosRef.current.z;
                 // Only correct if drift > 5mm (avoids jitter from sensor noise)
-                if (dx * dx + dz * dz > 0.000025) {
+                if (dx * dx + dy * dy + dz * dz > 0.000025) {
                   placedPosRef.current.x += dx * 0.08;
+                  placedPosRef.current.y += dy * 0.08;
                   placedPosRef.current.z += dz * 0.08;
                   mg.position.x = placedPosRef.current.x;
+                  mg.position.y = placedPosRef.current.y + heightRef.current;
                   mg.position.z = placedPosRef.current.z;
                 }
               }
             } catch {}
           }
 
-          if (shadowPlaneRef.current) shadowPlaneRef.current.position.y = placedPosRef.current.y;
+          if (shadowPlaneRef.current) {
+            if (surfaceNormal.y > 0.7) {
+              shadowPlaneRef.current.visible = true;
+              shadowPlaneRef.current.position.y = placedPosRef.current.y;
+            } else {
+              shadowPlaneRef.current.visible = false;
+            }
+          }
         }
 
         // ── PLANE VISUALIZATION: every 5th frame in scanning, skip entirely once placed+hidden ──
@@ -765,6 +861,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
     if (!mg) return;
 
     placedPosRef.current.copy(reticlePosSmoothed.current);
+    placementQuatRef.current.copy(reticleQuatSmoothed.current);
     mg.position.copy(placedPosRef.current);
     mg.visible = true;
 
@@ -775,23 +872,14 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
     if (shadowPlaneRef.current) {
       shadowPlaneRef.current.position.copy(placedPosRef.current);
-      shadowPlaneRef.current.visible = true;
+      shadowPlaneRef.current.visible = lastSurfaceTypeRef.current === 'floor';
     }
     if (dirLightRef.current) dirLightRef.current.target = mg;
 
-    // Create anchor
-    if (anchorRef.current) { try { anchorRef.current.delete(); } catch {} anchorRef.current = null; }
-    if (xrFrame && xrFrame.createAnchor && localSpace) {
-      try {
-        const q = reticleQuatSmoothed.current;
-        const p = placedPosRef.current;
-        const pose = new XRRigidTransform(
-          { x: p.x, y: p.y, z: p.z, w: 1 },
-          { x: q.x, y: q.y, z: q.z, w: q.w }
-        );
-        xrFrame.createAnchor(pose, localSpace).then(a => { anchorRef.current = a; }).catch(() => {});
-      } catch {}
-    }
+    // Create anchor at the placed pose
+    anchorRevisionRef.current += 1;
+    anchorRefreshPendingRef.current = false;
+    refreshAnchorAtPlacement(xrFrame, localSpace);
 
     _hitBufIdx.current = 0;
     _hitBufCount.current = 0;
@@ -804,7 +892,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
     setTimeout(() => setGestureHint(''), 4000);
 
     updatePhase('placed');
-  }, [updatePhase]);
+  }, [refreshAnchorAtPlacement, updatePhase]);
 
   const exitAR = useCallback(() => {
     if (sessionRef.current) sessionRef.current.end().catch(() => {});
