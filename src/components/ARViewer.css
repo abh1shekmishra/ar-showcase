@@ -98,39 +98,6 @@
   background: transparent;
 }
 
-/* AR Button */
-.ar-button {
-  position: absolute;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 14px 32px;
-  background: #1a1a1a;
-  color: white;
-  border: none;
-  border-radius: 12px;
-  font-size: 15px;
-  font-weight: 500;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  transition: all 0.2s ease;
-  z-index: 10;
-  letter-spacing: -0.01em;
-}
-
-.ar-button:hover {
-  transform: translateX(-50%) translateY(-2px);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
-  background: #2a2a2a;
-}
-
-.ar-button:active {
-  transform: translateX(-50%) translateY(0);
-}
-
 /* Loading Indicator */
 .loading-indicator {
   position: absolute;
@@ -986,6 +953,39 @@
 /* ============================================
    End of AR Scanning Overlay
    ============================================ */
+
+/* AR Button (model-viewer slot) */
+.ar-button {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 14px 32px;
+  background: #1a1a1a;
+  color: white;
+  border: none;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  transition: all 0.2s ease;
+  z-index: 10;
+  letter-spacing: -0.01em;
+}
+
+.ar-button:hover {
+  transform: translateX(-50%) translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+  background: #2a2a2a;
+}
+
+.ar-button:active {
+  transform: translateX(-50%) translateY(0);
+}
 
 /* Responsive Design */
 @media (max-width: 768px) {
