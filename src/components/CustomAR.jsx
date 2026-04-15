@@ -165,10 +165,18 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   // Camera-ray placement: place model at a fixed distance along the camera direction
   // Returns { position: Vector3, quaternion: Quaternion } or null
   const computeCameraRayPlacement = useCallback((frame, camera, mode) => {
-    if (!camera || !localSpaceRef.current) return null;
+    if (!frame || !localSpaceRef.current) return null;
 
-    camera.getWorldPosition(_rayOrigin.current);
-    camera.getWorldDirection(_rayDirection.current).normalize();
+    // Get camera pose from XR frame directly (Three.js camera matrix is stale during select events)
+    const viewerPose = frame.getViewerPose(localSpaceRef.current);
+    if (!viewerPose) return null;
+
+    const viewTransform = viewerPose.transform;
+    _rayOrigin.current.set(viewTransform.position.x, viewTransform.position.y, viewTransform.position.z);
+    // Camera looks along -Z in its local space; transform that direction to world space
+    const ori = viewTransform.orientation;
+    _tmpQuat.current.set(ori.x, ori.y, ori.z, ori.w);
+    _rayDirection.current.set(0, 0, -1).applyQuaternion(_tmpQuat.current).normalize();
 
     // Try to snap to a real detected plane first
     const detectedPlanes = frame.detectedPlanes;
