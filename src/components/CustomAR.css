@@ -252,6 +252,16 @@
   50% { opacity: 0.8; }
 }
 
+/* Full-screen tap target for wall/ceiling placement */
+.car-placement-tap {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+
 /* ── Gesture hint (placed mode) ── */
 .car-touch-capture {
   position: fixed;

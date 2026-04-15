@@ -142,6 +142,12 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
   // Surface placement mode: floor (scan-based), wall/ceiling (camera-ray based)
   const surfaceModeRef = useRef('floor'); // floor | wall | ceiling
+  // Camera pose cached from render loop (for DOM click handler placement)
+  const _lastCamOrigin = useRef(new THREE.Vector3());
+  const _lastCamDir = useRef(new THREE.Vector3(0, 0, -1));
+  const _lastCamPoseValid = useRef(false);
+  // Flag: DOM click requests placement in next frame (needs XR frame context)
+  const _pendingPlacement = useRef(false);
 
   // ── UI state (minimal — only for phase transitions + errors) ──
   const [phase, setPhase] = useState('loading');
@@ -163,20 +169,13 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   }, []);
 
   // Camera-ray placement: place model at a fixed distance along the camera direction
+  // Uses cached camera pose from render loop (always up-to-date)
   // Returns { position: Vector3, quaternion: Quaternion } or null
-  const computeCameraRayPlacement = useCallback((frame, camera, mode) => {
-    if (!frame || !localSpaceRef.current) return null;
+  const computeCameraRayPlacement = useCallback((frame, mode) => {
+    if (!_lastCamPoseValid.current || !localSpaceRef.current) return null;
 
-    // Get camera pose from XR frame directly (Three.js camera matrix is stale during select events)
-    const viewerPose = frame.getViewerPose(localSpaceRef.current);
-    if (!viewerPose) return null;
-
-    const viewTransform = viewerPose.transform;
-    _rayOrigin.current.set(viewTransform.position.x, viewTransform.position.y, viewTransform.position.z);
-    // Camera looks along -Z in its local space; transform that direction to world space
-    const ori = viewTransform.orientation;
-    _tmpQuat.current.set(ori.x, ori.y, ori.z, ori.w);
-    _rayDirection.current.set(0, 0, -1).applyQuaternion(_tmpQuat.current).normalize();
+    _rayOrigin.current.copy(_lastCamOrigin.current);
+    _rayDirection.current.copy(_lastCamDir.current);
 
     // Try to snap to a real detected plane first
     const detectedPlanes = frame.detectedPlanes;
@@ -707,15 +706,8 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
         const mode = surfaceModeRef.current;
 
-        // Wall/Ceiling mode: camera-ray placement (no scanning needed)
-        if (mode === 'wall' || mode === 'ceiling') {
-          const result = computeCameraRayPlacement(event.frame, cameraRef.current, mode);
-          if (result) {
-            primeReticlePose(result.position, result.quaternion);
-            placeModelAtReticle(event.frame, localSpace);
-          }
-          return;
-        }
+        // Wall/Ceiling mode: handled by DOM click + render loop, skip select
+        if (mode === 'wall' || mode === 'ceiling') return;
 
         // Floor mode: existing scan-and-place behavior
         if (reticleRef.current && reticleRef.current.visible) {
@@ -784,9 +776,31 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         if (currentPhase === 'scanning') {
           const mode = surfaceModeRef.current;
 
-          // Wall/Ceiling mode: no 3D reticle scanning, just show crosshair + wait for tap
+          // Wall/Ceiling mode: cache camera pose + handle pending placement
           if (mode === 'wall' || mode === 'ceiling') {
             if (ret) ret.visible = false;
+
+            // Cache viewer pose every frame for the DOM click handler
+            const viewerPose = frame.getViewerPose(localSpaceRef.current);
+            if (viewerPose) {
+              const vt = viewerPose.transform;
+              _lastCamOrigin.current.set(vt.position.x, vt.position.y, vt.position.z);
+              const ori = vt.orientation;
+              _tmpQuat.current.set(ori.x, ori.y, ori.z, ori.w);
+              _lastCamDir.current.set(0, 0, -1).applyQuaternion(_tmpQuat.current).normalize();
+              _lastCamPoseValid.current = true;
+            }
+
+            // Check if DOM click requested placement
+            if (_pendingPlacement.current && _lastCamPoseValid.current) {
+              _pendingPlacement.current = false;
+              const result = computeCameraRayPlacement(frame, mode);
+              if (result) {
+                primeReticlePose(result.position, result.quaternion);
+                placeModelAtReticle(frame, localSpaceRef.current);
+              }
+            }
+
             // Update hint text periodically
             if (now - lastUIUpdate.current > 500) {
               lastUIUpdate.current = now;
@@ -1272,6 +1286,14 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               </p>
             </div>
           </>
+        )}
+
+        {/* Full-screen tap target for wall/ceiling placement (DOM click, not XR select) */}
+        {phase === 'scanning' && surfaceMode !== 'floor' && (
+          <div
+            className="car-placement-tap"
+            onClick={() => { _pendingPlacement.current = true; }}
+          />
         )}
 
         {/* Touch capture layer — full-screen, pointer-events:auto in placed mode */}
