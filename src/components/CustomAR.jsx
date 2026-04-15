@@ -85,6 +85,9 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const _dragRight = useRef(new THREE.Vector3());
   const _dragForward = useRef(new THREE.Vector3());
 
+  // Plane viz optimization: skip iteration once all planes are hidden in placed mode
+  const _planesAllHidden = useRef(false);
+
   // Transient (touch) hit-test
   const transientHitSourceRef = useRef(null);
   const lastSurfaceTypeRef = useRef('floor'); // floor | wall | ceiling
@@ -181,6 +184,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
   const handleTouchEnd = useCallback((e) => {
     activeTouches.current = e.touches.length;
+    if (e.touches.length === 0) isDraggingModel.current = false;
   }, []);
 
   // ══════════════════════════════════════════════════════════════
@@ -650,7 +654,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         }
 
         // ── PLANE VISUALIZATION: render detected planes as grid overlays ──
-        if (frame.detectedPlanes && planeGroupRef.current) {
+        if (frame.detectedPlanes && planeGroupRef.current && !_planesAllHidden.current) {
           const existingPlanes = planeMeshesRef.current;
           const detectedPlanes = frame.detectedPlanes;
 
@@ -701,12 +705,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               geo.setIndex(indices);
               geo.computeVertexNormals();
 
-              // Determine surface type from plane orientation
-              const normal = new THREE.Vector3(0, 1, 0);
-              if (plane.orientation === 'vertical') {
-                normal.set(0, 0, 1);
-              }
-
               // ARCore-style dot grid material
               const isVertical = plane.orientation === 'vertical';
               const color = isVertical ? 0x42a5f5 : 0x00e676;
@@ -730,12 +728,24 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
             mesh.matrix.copy(poseMatrix);
             mesh.matrixAutoUpdate = false;
 
-            // Fade planes based on phase
+            // Fade planes based on phase (frame-rate independent)
             if (mesh.material) {
               const targetOpacity = currentPhase === 'placed' ? 0 : 0.12;
-              mesh.material.opacity += (targetOpacity - mesh.material.opacity) * 0.1;
+              mesh.material.opacity += (targetOpacity - mesh.material.opacity) * alpha;
               if (mesh.material.opacity < 0.005) mesh.visible = false;
               else mesh.visible = true;
+            }
+          }
+
+          // Once placed and all planes are invisible, stop iterating entirely
+          if (currentPhase === 'placed') {
+            let allHidden = true;
+            for (const [, m] of existingPlanes) {
+              if (m.visible) { allHidden = false; break; }
+            }
+            if (allHidden && existingPlanes.size > 0) {
+              _planesAllHidden.current = true;
+              planeGroupRef.current.visible = false;
             }
           }
         }
@@ -788,6 +798,8 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
     _hitBufIdx.current = 0;
     _hitBufCount.current = 0;
+    _planesAllHidden.current = false;
+    if (planeGroupRef.current) planeGroupRef.current.visible = true;
 
     // Show gesture hint briefly
     setGestureHint('Drag to move • Pinch to resize • Twist to rotate');
