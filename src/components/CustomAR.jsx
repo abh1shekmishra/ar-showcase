@@ -88,6 +88,13 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   // Plane viz optimization: skip iteration once all planes are hidden in placed mode
   const _planesAllHidden = useRef(false);
 
+  // Frame counter for throttling expensive XR API calls
+  const _frameCounter = useRef(0);
+  // Cached filtered quaternion for reticle (persists between hit-test frames)
+  const _filteredQuat = useRef(new THREE.Quaternion());
+  // Direct DOM ref for surface info text (bypasses React re-renders)
+  const surfaceTextRef = useRef(null);
+
   // Transient (touch) hit-test
   const transientHitSourceRef = useRef(null);
   const lastSurfaceTypeRef = useRef('floor'); // floor | wall | ceiling
@@ -98,7 +105,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
   // ── UI state (minimal — only for phase transitions + errors) ──
   const [phase, setPhase] = useState('loading');
-  const [surfaceInfo, setSurfaceInfo] = useState('');
   const [error, setError] = useState(null);
   const [loadProgress, setLoadProgress] = useState(0);
   const [gestureHint, setGestureHint] = useState('');
@@ -476,157 +482,152 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         const currentPhase = phaseRef.current;
         const ret = reticleRef.current;
         const mg = modelGroupRef.current;
+        const fc = ++_frameCounter.current;
 
-        // Light estimation
-        if (lightProbe && frame.getLightEstimate) {
+        // Light estimation (every 15th frame — lighting changes very slowly)
+        if (fc % 15 === 0 && lightProbe && frame.getLightEstimate) {
           try {
             const est = frame.getLightEstimate(lightProbe);
             if (est) {
               const pi = est.primaryLightIntensity;
               if (pi) {
                 const lum = Math.max(pi.x, pi.y, pi.z);
-                if (ambientRef.current) ambientRef.current.intensity += (Math.min(lum * 0.6, 2.5) - ambientRef.current.intensity) * alpha * 0.2;
+                if (ambientRef.current) ambientRef.current.intensity += (Math.min(lum * 0.6, 2.5) - ambientRef.current.intensity) * 0.12;
                 if (dirLightRef.current) {
-                  dirLightRef.current.intensity += (Math.min(lum * 0.8, 3.0) - dirLightRef.current.intensity) * alpha * 0.2;
+                  dirLightRef.current.intensity += (Math.min(lum * 0.8, 3.0) - dirLightRef.current.intensity) * 0.12;
                 }
               }
             }
           } catch {}
         }
 
-        // ── SCANNING: hit-test + reticle ──
+        // ── SCANNING ──
         if (currentPhase === 'scanning') {
-          let hitPose = null;
+          // Hit-test + median filter: every 2nd frame (halves XR API object allocations)
+          // Reticle lerp runs every frame for smooth motion regardless
+          if (fc & 1) {
+            let hitPose = null;
 
-          // 1. Viewer-space hit-test (continuous ray from screen center)
-          const hts = hitTestSourceRef.current;
-          if (hts) {
-            const results = frame.getHitTestResults(hts);
-            if (results.length > 0) {
-              hitPose = results[0].getPose(localSpaceRef.current);
-            }
-          }
-
-          // 2. Transient input hit-test (touch-directed, better for walls)
-          if (!hitPose && transientHitSourceRef.current) {
-            const transientResults = frame.getHitTestResultsForTransientInput(transientHitSourceRef.current);
-            if (transientResults && transientResults.length > 0) {
-              const inputResults = transientResults[0].results;
-              if (inputResults.length > 0) {
-                hitPose = inputResults[0].getPose(localSpaceRef.current);
+            const hts = hitTestSourceRef.current;
+            if (hts) {
+              const results = frame.getHitTestResults(hts);
+              if (results.length > 0) {
+                hitPose = results[0].getPose(localSpaceRef.current);
               }
             }
-          }
 
-          if (hitPose && ret) {
-            lastHitTime.current = now;
-            consecutiveHits.current++;
-
-            _tmpMat4.current.fromArray(hitPose.transform.matrix);
-            _tmpMat4.current.decompose(_tmpPos.current, _tmpQuat.current, _tmpScale.current);
-
-            // Ring buffer median filter (zero allocation)
-            const bufPos = _hitBufPos.current;
-            const bufQuat = _hitBufQuat.current;
-            const idx = _hitBufIdx.current % HIT_BUFFER_SIZE;
-            bufPos[idx].copy(_tmpPos.current);
-            bufQuat[idx].copy(_tmpQuat.current);
-            _hitBufIdx.current++;
-            const count = Math.min(_hitBufIdx.current, HIT_BUFFER_SIZE);
-            _hitBufCount.current = count;
-
-            const fPos = _filteredPos.current;
-            let fQuat = bufQuat[idx]; // default: latest
-
-            if (count >= 3) {
-              // Median per axis — zero allocation (insertion sort in-place on pre-allocated buffers)
-              const sx = _sortBufX.current;
-              const sy = _sortBufY.current;
-              const sz = _sortBufZ.current;
-              for (let i = 0; i < count; i++) { sx[i] = bufPos[i].x; sy[i] = bufPos[i].y; sz[i] = bufPos[i].z; }
-              // Insertion sort (5 elements max, faster than .sort() and no allocation)
-              for (let k = 0; k < 3; k++) {
-                const arr = k === 0 ? sx : k === 1 ? sy : sz;
-                for (let i = 1; i < count; i++) {
-                  const v = arr[i];
-                  let j = i - 1;
-                  while (j >= 0 && arr[j] > v) { arr[j + 1] = arr[j]; j--; }
-                  arr[j + 1] = v;
+            if (!hitPose && transientHitSourceRef.current) {
+              const transientResults = frame.getHitTestResultsForTransientInput(transientHitSourceRef.current);
+              if (transientResults && transientResults.length > 0) {
+                const inputResults = transientResults[0].results;
+                if (inputResults.length > 0) {
+                  hitPose = inputResults[0].getPose(localSpaceRef.current);
                 }
               }
-              const mid = count >> 1;
-              fPos.set(
-                count & 1 ? sx[mid] : (sx[mid - 1] + sx[mid]) * 0.5,
-                count & 1 ? sy[mid] : (sy[mid - 1] + sy[mid]) * 0.5,
-                count & 1 ? sz[mid] : (sz[mid - 1] + sz[mid]) * 0.5
-              );
-              // Pick quaternion closest to median position
-              let bi = 0, bd = Infinity;
-              for (let i = 0; i < count; i++) { const d = bufPos[i].distanceToSquared(fPos); if (d < bd) { bd = d; bi = i; } }
-              fQuat = bufQuat[bi];
-            } else {
-              fPos.copy(_tmpPos.current);
             }
 
-            if (!reticleHasFirstPose.current) {
-              reticlePosSmoothed.current.copy(fPos);
-              reticleQuatSmoothed.current.copy(fQuat);
-              reticleHasFirstPose.current = true;
-            } else {
-              reticlePosSmoothed.current.lerp(fPos, alpha);
-              reticleQuatSmoothed.current.slerp(fQuat, alpha);
-            }
+            if (hitPose) {
+              lastHitTime.current = now;
+              consecutiveHits.current++;
 
-            ret.position.copy(reticlePosSmoothed.current);
-            ret.quaternion.copy(reticleQuatSmoothed.current);
-            ret.visible = true;
+              _tmpMat4.current.fromArray(hitPose.transform.matrix);
+              _tmpMat4.current.decompose(_tmpPos.current, _tmpQuat.current, _tmpScale.current);
 
-            // Animated reticle: pulse + rotate scan arc
-            const confidence = Math.min(1, consecutiveHits.current / 10);
-            const pulse = 0.85 + 0.2 * confidence + 0.08 * Math.sin(now * 0.005);
-            ret.scale.set(pulse, pulse, pulse);
+              // Ring buffer median filter (zero allocation)
+              const bufPos = _hitBufPos.current;
+              const bufQuat = _hitBufQuat.current;
+              const idx = _hitBufIdx.current % HIT_BUFFER_SIZE;
+              bufPos[idx].copy(_tmpPos.current);
+              bufQuat[idx].copy(_tmpQuat.current);
+              _hitBufIdx.current++;
+              const count = Math.min(_hitBufIdx.current, HIT_BUFFER_SIZE);
+              _hitBufCount.current = count;
 
-            // Rotate the scanning arc (cached ref, no traversal)
-            if (_scanArcRef.current) _scanArcRef.current.rotation.z = now * 0.003;
+              const fPos = _filteredPos.current;
+              let fQuat = bufQuat[idx];
 
-            // Glow intensity grows with confidence
-            if (_glowRef.current) _glowRef.current.material.opacity = 0.05 + confidence * 0.12;
-
-            // Diamond brightness
-            if (_diamondRef.current) _diamondRef.current.material.opacity = 0.6 + confidence * 0.4;
-
-            // Throttled surface info (max 2x/sec)
-            if (now - lastUIUpdate.current > 500) {
-              lastUIUpdate.current = now;
-              const up = _tmpUp.current.set(0, 1, 0).applyQuaternion(fQuat);
-              let info, stype;
-              if (up.y > 0.7) { info = '⬇ Floor detected — tap to place'; stype = 'floor'; }
-              else if (up.y < -0.7) { info = '⬆ Ceiling detected — tap to place'; stype = 'ceiling'; }
-              else { info = '◧ Wall detected — tap to place'; stype = 'wall'; }
-              lastSurfaceTypeRef.current = stype;
-              if (info !== surfaceInfoRef.current) {
-                surfaceInfoRef.current = info;
-                setSurfaceInfo(info);
+              if (count >= 3) {
+                const sx = _sortBufX.current;
+                const sy = _sortBufY.current;
+                const sz = _sortBufZ.current;
+                for (let i = 0; i < count; i++) { sx[i] = bufPos[i].x; sy[i] = bufPos[i].y; sz[i] = bufPos[i].z; }
+                for (let k = 0; k < 3; k++) {
+                  const arr = k === 0 ? sx : k === 1 ? sy : sz;
+                  for (let i = 1; i < count; i++) {
+                    const v = arr[i];
+                    let j = i - 1;
+                    while (j >= 0 && arr[j] > v) { arr[j + 1] = arr[j]; j--; }
+                    arr[j + 1] = v;
+                  }
+                }
+                const mid = count >> 1;
+                fPos.set(
+                  count & 1 ? sx[mid] : (sx[mid - 1] + sx[mid]) * 0.5,
+                  count & 1 ? sy[mid] : (sy[mid - 1] + sy[mid]) * 0.5,
+                  count & 1 ? sz[mid] : (sz[mid - 1] + sz[mid]) * 0.5
+                );
+                let bi = 0, bd = Infinity;
+                for (let i = 0; i < count; i++) { const d = bufPos[i].distanceToSquared(fPos); if (d < bd) { bd = d; bi = i; } }
+                fQuat = bufQuat[bi];
+              } else {
+                fPos.copy(_tmpPos.current);
               }
+
+              _filteredQuat.current.copy(fQuat);
+
+              if (!reticleHasFirstPose.current) {
+                reticlePosSmoothed.current.copy(fPos);
+                reticleQuatSmoothed.current.copy(fQuat);
+                reticleHasFirstPose.current = true;
+              }
+            } else {
+              consecutiveHits.current = 0;
             }
-          } else if (ret) {
-            consecutiveHits.current = 0;
-            if (now - lastHitTime.current > 300) ret.visible = false;
-            // Keep arc rotating even without hit (cached ref)
-            if (_scanArcRef.current) _scanArcRef.current.rotation.z = now * 0.003;
+          }
+
+          // Reticle visual update — runs EVERY frame for buttery smooth motion
+          if (ret) {
+            if (!reticleHasFirstPose.current || now - lastHitTime.current > 300) {
+              ret.visible = false;
+            } else {
+              // Smooth interpolation toward last filtered target (even on skip frames)
+              reticlePosSmoothed.current.lerp(_filteredPos.current, alpha);
+              reticleQuatSmoothed.current.slerp(_filteredQuat.current, alpha);
+              ret.position.copy(reticlePosSmoothed.current);
+              ret.quaternion.copy(reticleQuatSmoothed.current);
+              ret.visible = true;
+
+              const confidence = Math.min(1, consecutiveHits.current / 10);
+              const pulse = 0.85 + 0.2 * confidence + 0.08 * Math.sin(now * 0.005);
+              ret.scale.set(pulse, pulse, pulse);
+              if (_scanArcRef.current) _scanArcRef.current.rotation.z = now * 0.003;
+              if (_glowRef.current) _glowRef.current.material.opacity = 0.05 + confidence * 0.12;
+              if (_diamondRef.current) _diamondRef.current.material.opacity = 0.6 + confidence * 0.4;
+            }
+
+            // Surface info — direct DOM update (zero React re-renders)
             if (now - lastUIUpdate.current > 500) {
               lastUIUpdate.current = now;
-              if (surfaceInfoRef.current !== 'Move slowly to scan surfaces...') {
-                surfaceInfoRef.current = 'Move slowly to scan surfaces...';
-                setSurfaceInfo('Move slowly to scan surfaces...');
+              const stRef = surfaceTextRef.current;
+              if (stRef) {
+                if (reticleHasFirstPose.current && now - lastHitTime.current <= 300) {
+                  const up = _tmpUp.current.set(0, 1, 0).applyQuaternion(_filteredQuat.current);
+                  let info;
+                  if (up.y > 0.7) { info = '⬇ Floor detected — tap to place'; lastSurfaceTypeRef.current = 'floor'; }
+                  else if (up.y < -0.7) { info = '⬆ Ceiling detected — tap to place'; lastSurfaceTypeRef.current = 'ceiling'; }
+                  else { info = '◧ Wall detected — tap to place'; lastSurfaceTypeRef.current = 'wall'; }
+                  if (info !== surfaceInfoRef.current) { surfaceInfoRef.current = info; stRef.textContent = info; }
+                } else if (surfaceInfoRef.current !== 'Move slowly to scan surfaces...') {
+                  surfaceInfoRef.current = 'Move slowly to scan surfaces...';
+                  stRef.textContent = 'Move slowly to scan surfaces...';
+                }
               }
             }
           }
         }
 
-        // ── PLACED: apply gesture transforms, anchor drift correction ──
+        // ── PLACED: apply gesture transforms ──
         if (currentPhase === 'placed' && mg) {
-          // Hide reticle completely in placed mode
           if (ret) ret.visible = false;
 
           const s = scaleRef.current;
@@ -636,16 +637,21 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
           mg.position.y = placedPosRef.current.y + heightRef.current;
           mg.position.z = placedPosRef.current.z;
 
-          // Anchor drift correction — only when NOT being dragged
-          if (anchorRef.current && !isDraggingModel.current) {
+          // Anchor drift correction — every 8th frame, only >5mm drift, gentle
+          if (fc % 8 === 0 && anchorRef.current && !isDraggingModel.current) {
             try {
               const ap = frame.getPose(anchorRef.current.anchorSpace, localSpace);
               if (ap) {
                 const a = ap.transform.position;
-                placedPosRef.current.x += (a.x - placedPosRef.current.x) * alpha * 0.5;
-                placedPosRef.current.z += (a.z - placedPosRef.current.z) * alpha * 0.5;
-                mg.position.x = placedPosRef.current.x;
-                mg.position.z = placedPosRef.current.z;
+                const dx = a.x - placedPosRef.current.x;
+                const dz = a.z - placedPosRef.current.z;
+                // Only correct if drift > 5mm (avoids jitter from sensor noise)
+                if (dx * dx + dz * dz > 0.000025) {
+                  placedPosRef.current.x += dx * 0.08;
+                  placedPosRef.current.z += dz * 0.08;
+                  mg.position.x = placedPosRef.current.x;
+                  mg.position.z = placedPosRef.current.z;
+                }
               }
             } catch {}
           }
@@ -653,12 +659,11 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
           if (shadowPlaneRef.current) shadowPlaneRef.current.position.y = placedPosRef.current.y;
         }
 
-        // ── PLANE VISUALIZATION: render detected planes as grid overlays ──
-        if (frame.detectedPlanes && planeGroupRef.current && !_planesAllHidden.current) {
+        // ── PLANE VISUALIZATION: every 5th frame in scanning, skip entirely once placed+hidden ──
+        if (fc % 5 === 0 && frame.detectedPlanes && planeGroupRef.current && !_planesAllHidden.current) {
           const existingPlanes = planeMeshesRef.current;
           const detectedPlanes = frame.detectedPlanes;
 
-          // Remove meshes for planes no longer detected
           for (const [plane, mesh] of existingPlanes) {
             if (!detectedPlanes.has(plane)) {
               planeGroupRef.current.remove(mesh);
@@ -668,7 +673,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
             }
           }
 
-          // Add/update meshes for detected planes
           for (const plane of detectedPlanes) {
             const planePose = frame.getPose(plane.planeSpace, localSpaceRef.current);
             if (!planePose) continue;
@@ -677,7 +681,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
             const polygon = plane.polygon;
             if (!polygon || polygon.length < 3) continue;
 
-            // Check if plane geometry needs update
             const needsCreate = !mesh;
             const needsUpdate = mesh && mesh.userData.lastChanged !== plane.lastChangedTime;
 
@@ -688,7 +691,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
                 mesh.material.dispose();
               }
 
-              // Build geometry from plane polygon
               const verts = [];
               for (const p of polygon) {
                 verts.push(p.x, p.y, p.z);
@@ -697,7 +699,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               const positions = new Float32Array(verts);
               geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
 
-              // Triangulate (fan from first vertex)
               const indices = [];
               for (let i = 1; i < polygon.length - 1; i++) {
                 indices.push(0, i, i + 1);
@@ -705,7 +706,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               geo.setIndex(indices);
               geo.computeVertexNormals();
 
-              // ARCore-style dot grid material
               const isVertical = plane.orientation === 'vertical';
               const color = isVertical ? 0x42a5f5 : 0x00e676;
               const mat = new THREE.MeshBasicMaterial({
@@ -723,21 +723,18 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               planeGroupRef.current.add(mesh);
             }
 
-            // Update transform
             const poseMatrix = _tmpMat4.current.fromArray(planePose.transform.matrix);
             mesh.matrix.copy(poseMatrix);
             mesh.matrixAutoUpdate = false;
 
-            // Fade planes based on phase (frame-rate independent)
             if (mesh.material) {
               const targetOpacity = currentPhase === 'placed' ? 0 : 0.12;
-              mesh.material.opacity += (targetOpacity - mesh.material.opacity) * alpha;
+              mesh.material.opacity += (targetOpacity - mesh.material.opacity) * 0.3;
               if (mesh.material.opacity < 0.005) mesh.visible = false;
               else mesh.visible = true;
             }
           }
 
-          // Once placed and all planes are invisible, stop iterating entirely
           if (currentPhase === 'placed') {
             let allHidden = true;
             for (const [, m] of existingPlanes) {
@@ -767,9 +764,8 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
     const mg = modelGroupRef.current;
     if (!mg) return;
 
-    const pos = reticlePosSmoothed.current.clone();
-    placedPosRef.current.copy(pos);
-    mg.position.copy(pos);
+    placedPosRef.current.copy(reticlePosSmoothed.current);
+    mg.position.copy(placedPosRef.current);
     mg.visible = true;
 
     // Reset gesture state
@@ -778,7 +774,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
     heightRef.current = 0;
 
     if (shadowPlaneRef.current) {
-      shadowPlaneRef.current.position.set(pos.x, pos.y, pos.z);
+      shadowPlaneRef.current.position.copy(placedPosRef.current);
       shadowPlaneRef.current.visible = true;
     }
     if (dirLightRef.current) dirLightRef.current.target = mg;
@@ -788,8 +784,9 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
     if (xrFrame && xrFrame.createAnchor && localSpace) {
       try {
         const q = reticleQuatSmoothed.current;
+        const p = placedPosRef.current;
         const pose = new XRRigidTransform(
-          { x: pos.x, y: pos.y, z: pos.z, w: 1 },
+          { x: p.x, y: p.y, z: p.z, w: 1 },
           { x: q.x, y: q.y, z: q.z, w: q.w }
         );
         xrFrame.createAnchor(pose, localSpace).then(a => { anchorRef.current = a; }).catch(() => {});
@@ -798,8 +795,9 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
     _hitBufIdx.current = 0;
     _hitBufCount.current = 0;
-    _planesAllHidden.current = false;
-    if (planeGroupRef.current) planeGroupRef.current.visible = true;
+    // Immediately hide plane overlays (avoids per-frame iteration during placed mode)
+    _planesAllHidden.current = true;
+    if (planeGroupRef.current) planeGroupRef.current.visible = false;
 
     // Show gesture hint briefly
     setGestureHint('Drag to move • Pinch to resize • Twist to rotate');
@@ -874,7 +872,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
             <div className="car-scan-hud">
               <div className="car-scan-pill">
                 <div className="car-pulse-dot" />
-                <span>{surfaceInfo || 'Move slowly to scan...'}</span>
+                <span ref={surfaceTextRef}>Move slowly to scan...</span>
               </div>
               <p className="car-scan-hint">
                 Point camera at a surface and move slowly.
