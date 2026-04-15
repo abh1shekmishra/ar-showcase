@@ -964,3 +964,36 @@ model-viewer:not([ar-status="session-started"]):not([ar-status="object-placed"])
     display: none;
   }
 }
+
+/* Custom AR Launch Button */
+.ar-launch-btn {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 14px 32px;
+  background: linear-gradient(135deg, #1a1a1a, #333);
+  color: white;
+  border: none;
+  border-radius: 14px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  transition: all 0.2s ease;
+  z-index: 10;
+  letter-spacing: -0.01em;
+}
+
+.ar-launch-btn:hover {
+  transform: translateX(-50%) translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  background: linear-gradient(135deg, #2a2a2a, #444);
+}
+
+.ar-launch-btn:active {
+  transform: translateX(-50%) translateY(0);
+}

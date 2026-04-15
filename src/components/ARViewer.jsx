@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import '@google/model-viewer';
+import CustomAR from './CustomAR';
 import './ARViewer.css';
 
 const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) => {
@@ -13,26 +14,11 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
   const [debugMessages, setDebugMessages] = useState([]);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [showInstructions, setShowInstructions] = useState(true);
-  const [isInAR, setIsInAR] = useState(false);
   const [environment, setEnvironment] = useState('neutral');
   const [exposure, setExposure] = useState(1);
   const [skyboxImage, setSkyboxImage] = useState('');
-  const preARScaleRef = useRef(1);
-  const preARRotationRef = useRef(0);
-
-  // AR fine-tuning controls
-  const [arScale, setArScale] = useState(1);
-  const [arRotation, setArRotation] = useState(0);
-  const [arHeight, setArHeight] = useState(0); // vertical offset in meters
-  const [showArControls, setShowArControls] = useState(false);
-
-  // Determine placement type from category
-  const isCeiling = modelCategory === 'Ceiling Lamps' || modelCategory === 'Chandeliers';
-  const isWall = modelCategory === 'Wall Lights';
-  const arPlacement = isWall ? 'wall' : 'floor';
-
-  // Default ceiling height (meters) — user can adjust
-  const DEFAULT_CEILING_HEIGHT = 2.5;
+  // Custom AR session
+  const [showCustomAR, setShowCustomAR] = useState(false);
 
   const environments = [
     { value: 'neutral', label: '⬜ Blank', exposure: 1, skybox: '' },
@@ -234,88 +220,14 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
         }
       };
 
-      // AR status events
-      const handleARStatus = (event) => {
-        const status = event.detail.status;
-        console.log('AR Status:', status);
-        
-        if (status === 'session-started') {
-          addDebugMessage('AR session started!', 'success');
-          setIsInAR(true);
-          setShowArControls(true);
-          
-          // Save current preview state
-          preARScaleRef.current = scale;
-          preARRotationRef.current = rotationY;
-          
-          // Reset AR fine-tuning
-          setArScale(1);
-          setArRotation(0);
-          setArHeight(isCeiling ? DEFAULT_CEILING_HEIGHT : 0);
-          
-          if (modelViewer) {
-            if (isCeiling) {
-              // Flip upside down so fixture hangs from ceiling
-              modelViewer.orientation = '180deg 0deg 0deg';
-            } else {
-              modelViewer.scale = '1 1 1';
-              modelViewer.orientation = '0deg 0deg 0deg';
-            }
-          }
-        } else if (status === 'object-placed') {
-          addDebugMessage('Placed! Use controls to fine-tune.', 'success');
-        } else if (status === 'not-presenting') {
-          addDebugMessage('AR session ended', 'info');
-          setIsInAR(false);
-          setShowArControls(false);
-          
-          // Restore preview scale/rotation
-          if (modelViewer) {
-            const s = preARScaleRef.current;
-            modelViewer.scale = `${s} ${s} ${s}`;
-            modelViewer.orientation = `0deg ${preARRotationRef.current}deg 0deg`;
-          }
-        } else if (status === 'failed') {
-          const errorMsg = 'AR failed. Model may be too large or incompatible.';
-          setError(errorMsg);
-          addDebugMessage(errorMsg, 'error');
-          addDebugMessage('Troubleshooting:', 'warning');
-          addDebugMessage('- Ensure adequate lighting', 'warning');
-          addDebugMessage('- Try a different flat surface', 'warning');
-          addDebugMessage('- Move camera slowly and deliberately', 'warning');
-          setIsInAR(false);
-          setShowArControls(false);
-          
-          if (isIOS) {
-            addDebugMessage('iOS: Try smaller model (<10MB)', 'warning');
-          }
-        }
-      };
-
-      // AR tracking events — surface detection quality
-      const handleARTracking = (event) => {
-        const trackingState = event.detail.status;
-        console.log('AR Tracking:', trackingState);
-        
-        if (trackingState === 'tracking') {
-          addDebugMessage('✅ Surface detected — tap to place!', 'success');
-        } else if (trackingState === 'not-tracking') {
-          addDebugMessage('🔍 Looking for surfaces...', 'info');
-        }
-      };
-
       modelViewer.addEventListener('load', handleLoad);
       modelViewer.addEventListener('error', handleError);
       modelViewer.addEventListener('progress', handleProgress);
-      modelViewer.addEventListener('ar-status', handleARStatus);
-      modelViewer.addEventListener('ar-tracking', handleARTracking);
 
       return () => {
         modelViewer.removeEventListener('load', handleLoad);
         modelViewer.removeEventListener('error', handleError);
         modelViewer.removeEventListener('progress', handleProgress);
-        modelViewer.removeEventListener('ar-status', handleARStatus);
-        modelViewer.removeEventListener('ar-tracking', handleARTracking);
       };
     }
   }, [modelSrc]);
@@ -335,23 +247,6 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
       modelViewer.orientation = `0deg ${rotationY}deg 0deg`;
     }
   }, [rotationY, modelLoaded]);
-
-  // Apply AR fine-tuning controls during AR session
-  useEffect(() => {
-    const modelViewer = modelViewerRef.current;
-    if (modelViewer && isInAR) {
-      // Apply AR scale
-      const s = arScale;
-      modelViewer.scale = `${s} ${s} ${s}`;
-      
-      // Apply AR rotation + ceiling flip
-      if (isCeiling) {
-        modelViewer.orientation = `180deg ${arRotation}deg 0deg`;
-      } else {
-        modelViewer.orientation = `0deg ${arRotation}deg 0deg`;
-      }
-    }
-  }, [arScale, arRotation, arHeight, isInAR, isCeiling]);
 
   const handleScaleChange = (newScale) => {
     setScale(Math.max(0.1, Math.min(5, newScale)));
@@ -409,10 +304,6 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
         ref={modelViewerRef}
         src={modelSrc}
         alt="3D Model"
-        ar
-        ar-modes="webxr scene-viewer quick-look"
-        ar-placement={arPlacement}
-        ar-scale="fixed"
         camera-controls
         touch-action="pan-y"
         shadow-intensity="2"
@@ -428,115 +319,7 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
         interpolation-decay="100"
         class="model-viewer"
       >
-        {/* AR Button */}
-        <button 
-          slot="ar-button" 
-          className="ar-button"
-        >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="white">
-            <path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0-5C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z"/>
-          </svg>
-          View in AR
-        </button>
 
-        {/* AR Prompt - shown during WebXR before model placement via CSS ar-status */}
-        <div id="ar-prompt">
-          <img 
-            src="https://modelviewer.dev/shared-assets/icons/hand.png" 
-            alt="Point your phone at a surface"
-          />
-        </div>
-
-        {/* AR tracking failure message */}
-        <div id="ar-failure">
-          AR is not tracking!<br/>
-          Move slowly and ensure good lighting.
-        </div>
-
-        {/* AR Fine-Tuning Controls — visible during AR session */}
-        <div id="ar-controls" className={`ar-controls ${showArControls ? 'visible' : ''}`}>
-          <div className="ar-controls-header">
-            <span className="ar-controls-title">
-              {isCeiling ? '💡 Ceiling Fixture' : isWall ? '🔲 Wall Light' : '🔧 Adjust'}
-            </span>
-            <button 
-              className="ar-controls-toggle"
-              onClick={() => setShowArControls(prev => !prev)}
-            >
-              ▼
-            </button>
-          </div>
-          
-          {/* Height control — especially important for ceiling fixtures */}
-          {isCeiling && (
-            <div className="ar-control-row">
-              <label>Height</label>
-              <div className="ar-slider-row">
-                <button onClick={() => setArHeight(h => Math.max(0, h - 0.1))}>−</button>
-                <input
-                  type="range"
-                  min="0"
-                  max="4"
-                  step="0.05"
-                  value={arHeight}
-                  onChange={(e) => setArHeight(parseFloat(e.target.value))}
-                />
-                <button onClick={() => setArHeight(h => Math.min(4, h + 0.1))}>+</button>
-              </div>
-              <span className="ar-value">{arHeight.toFixed(1)}m</span>
-            </div>
-          )}
-
-          {/* Scale control */}
-          <div className="ar-control-row">
-            <label>Scale</label>
-            <div className="ar-slider-row">
-              <button onClick={() => setArScale(s => Math.max(0.2, s - 0.1))}>−</button>
-              <input
-                type="range"
-                min="0.2"
-                max="3"
-                step="0.05"
-                value={arScale}
-                onChange={(e) => setArScale(parseFloat(e.target.value))}
-              />
-              <button onClick={() => setArScale(s => Math.min(3, s + 0.1))}>+</button>
-            </div>
-            <span className="ar-value">{arScale.toFixed(1)}x</span>
-          </div>
-
-          {/* Rotation control */}
-          <div className="ar-control-row">
-            <label>Rotate</label>
-            <div className="ar-slider-row">
-              <button onClick={() => setArRotation(r => r - 15)}>↺</button>
-              <input
-                type="range"
-                min="0"
-                max="360"
-                step="5"
-                value={arRotation % 360}
-                onChange={(e) => setArRotation(parseInt(e.target.value))}
-              />
-              <button onClick={() => setArRotation(r => r + 15)}>↻</button>
-            </div>
-            <span className="ar-value">{arRotation % 360}°</span>
-          </div>
-
-          {/* Quick actions */}
-          <div className="ar-quick-actions">
-            <button onClick={() => { setArScale(1); setArRotation(0); setArHeight(isCeiling ? DEFAULT_CEILING_HEIGHT : 0); }}>
-              Reset
-            </button>
-            {isCeiling && (
-              <>
-                <button onClick={() => setArHeight(2.4)}>2.4m</button>
-                <button onClick={() => setArHeight(2.7)}>2.7m</button>
-                <button onClick={() => setArHeight(3.0)}>3.0m</button>
-              </>
-            )}
-          </div>
-        </div>
 
         {/* Loading Indicator */}
         <div className="loading-indicator" slot="poster">
@@ -555,6 +338,28 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
           </ul>
         </div>
       </model-viewer>
+
+      {/* View in AR button */}
+      {modelLoaded && (
+        <button
+          className="ar-launch-btn"
+          onClick={() => setShowCustomAR(true)}
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="white">
+            <path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0-5C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z"/>
+          </svg>
+          View in AR
+        </button>
+      )}
+
+      {/* Custom AR session */}
+      {showCustomAR && (
+        <CustomAR
+          modelSrc={modelSrc}
+          modelCategory={modelCategory}
+          onClose={() => setShowCustomAR(false)}
+        />
+      )}
 
       {/* Error Toast */}
       {error && (
