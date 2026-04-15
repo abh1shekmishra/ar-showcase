@@ -60,10 +60,18 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const singleTouchStartY = useRef(0);
   const singleTouchStartHeight = useRef(0);
   const activeTouches = useRef(0);
+  const touchCaptureRef = useRef(null);
 
   // Throttle UI updates
   const lastUIUpdate = useRef(0);
   const surfaceInfoRef = useRef('');
+
+  // Pre-allocated reusable objects (avoid GC pressure in render loop)
+  const _tmpMat4 = useRef(new THREE.Matrix4());
+  const _tmpPos = useRef(new THREE.Vector3());
+  const _tmpQuat = useRef(new THREE.Quaternion());
+  const _tmpScale = useRef(new THREE.Vector3());
+  const _tmpUp = useRef(new THREE.Vector3());
 
   // ── UI state (minimal — only for phase transitions + errors) ──
   const [phase, setPhase] = useState('loading');
@@ -326,12 +334,20 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
         }
       });
 
-      // Touch gestures on overlay
+      // Prevent XR from consuming touches in placed mode
       const overlay = overlayRef.current;
       if (overlay) {
-        overlay.addEventListener('touchstart', handleTouchStart, { passive: true });
-        overlay.addEventListener('touchmove', handleTouchMove, { passive: true });
-        overlay.addEventListener('touchend', handleTouchEnd, { passive: true });
+        overlay.addEventListener('beforexrselect', (e) => {
+          if (phaseRef.current === 'placed') e.preventDefault();
+        });
+      }
+
+      // Touch gestures on the capture layer (pointer-events:auto div)
+      const capture = touchCaptureRef.current;
+      if (capture) {
+        capture.addEventListener('touchstart', handleTouchStart, { passive: true });
+        capture.addEventListener('touchmove', handleTouchMove, { passive: true });
+        capture.addEventListener('touchend', handleTouchEnd, { passive: true });
       }
 
       const SMOOTH_SPEED = 14;
@@ -376,11 +392,10 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
                 lastHitTime.current = now;
                 consecutiveHits.current++;
 
-                const m4 = new THREE.Matrix4().fromArray(pose.transform.matrix);
-                const rawPos = new THREE.Vector3();
-                const rawQuat = new THREE.Quaternion();
-                const rawSc = new THREE.Vector3();
-                m4.decompose(rawPos, rawQuat, rawSc);
+                _tmpMat4.current.fromArray(pose.transform.matrix);
+                const rawPos = _tmpPos.current;
+                const rawQuat = _tmpQuat.current;
+                _tmpMat4.current.decompose(rawPos, rawQuat, _tmpScale.current);
 
                 // Median filter
                 const pb = hitPosBuffer.current;
@@ -390,9 +405,9 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
                 if (pb.length > HIT_BUFFER_SIZE) pb.shift();
                 if (qb.length > HIT_BUFFER_SIZE) qb.shift();
 
-                let fPos = rawPos, fQuat = rawQuat;
+                let fPos = rawPos.clone(), fQuat = rawQuat.clone();
                 if (pb.length >= 3) {
-                  fPos = new THREE.Vector3(median(pb.map(p => p.x)), median(pb.map(p => p.y)), median(pb.map(p => p.z)));
+                  fPos.set(median(pb.map(p => p.x)), median(pb.map(p => p.y)), median(pb.map(p => p.z)));
                   let bi = 0, bd = Infinity;
                   for (let i = 0; i < pb.length; i++) { const d = pb[i].distanceToSquared(fPos); if (d < bd) { bd = d; bi = i; } }
                   fQuat = qb[bi];
@@ -418,7 +433,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
                 // Throttled surface info (max 2x/sec)
                 if (now - lastUIUpdate.current > 500) {
                   lastUIUpdate.current = now;
-                  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(fQuat);
+                  const up = _tmpUp.current.set(0, 1, 0).applyQuaternion(fQuat);
                   let info;
                   if (up.y > 0.7) info = 'Floor detected — tap to place';
                   else if (up.y < -0.7) info = 'Ceiling detected — tap to place';
@@ -574,6 +589,12 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
             </p>
           </div>
         )}
+
+        {/* Touch capture layer — full-screen, pointer-events:auto in placed mode */}
+        <div
+          ref={touchCaptureRef}
+          className={`car-touch-capture ${phase === 'placed' ? 'car-touch-active' : ''}`}
+        />
 
         {phase === 'placed' && gestureHint && (
           <div className="car-gesture-hint">
