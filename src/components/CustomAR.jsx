@@ -4,6 +4,15 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import './CustomAR.css';
 
+// Median filter: returns median of a sorted copy of the array
+const median = (arr) => {
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+};
+
 const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const containerRef = useRef(null);
   const overlayRef = useRef(null);
@@ -33,6 +42,15 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   const reticlePosSmoothed = useRef(new THREE.Vector3());
   const reticleQuatSmoothed = useRef(new THREE.Quaternion());
   const reticleHasFirstPose = useRef(false);
+  const lastFrameTime = useRef(0); // for frame-rate independent smoothing
+
+  // Hit-test outlier rejection: rolling buffer of recent positions
+  const HIT_BUFFER_SIZE = 7;
+  const hitPosBuffer = useRef([]); // array of THREE.Vector3
+  const hitQuatBuffer = useRef([]); // array of THREE.Quaternion
+
+  // XR anchor for drift-proof placement
+  const anchorRef = useRef(null);
 
   // Tracking quality
   const lastHitTime = useRef(0);
@@ -257,6 +275,10 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
     return () => {
       cancelledRef.current = true;
+      if (anchorRef.current) {
+        try { anchorRef.current.delete(); } catch {}
+        anchorRef.current = null;
+      }
       if (sessionRef.current) {
         sessionRef.current.end().catch(() => {});
         sessionRef.current = null;
@@ -365,25 +387,37 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
       });
 
       // ── TAP handler: place or reposition ──
-      session.addEventListener('select', () => {
+      session.addEventListener('select', (event) => {
         const currentPhase = phaseRef.current;
         const ret = reticleRef.current;
+        const xrFrame = event.frame;
 
         // Scanning: place model at reticle
         if (currentPhase === 'scanning' && ret && ret.visible) {
-          placeModelAtReticle();
+          placeModelAtReticle(xrFrame);
         }
         // Already placed: reposition (tap to move)
         else if (currentPhase === 'placed' && ret && ret.visible) {
-          placeModelAtReticle();
+          placeModelAtReticle(xrFrame);
         }
       });
 
       // ── Render loop ──
-      const LERP_FACTOR = 0.25; // Smoothing: 0 = no move, 1 = instant snap
+      // Smoothing constant: higher = snappier, lower = smoother
+      // Using frame-rate independent formula: 1 - e^(-speed * dt)
+      const SMOOTH_SPEED = 12; // ~0.25 at 60fps, adapts to any frame rate
 
       renderer.setAnimationLoop((timestamp, frame) => {
         if (cancelledRef.current || !frame) return;
+
+        // ── Frame-rate independent delta time ──
+        const now = performance.now();
+        const dt = lastFrameTime.current > 0
+          ? Math.min((now - lastFrameTime.current) / 1000, 0.1) // cap at 100ms
+          : 0.016; // assume 60fps on first frame
+        lastFrameTime.current = now;
+
+        const lerpAlpha = 1 - Math.exp(-SMOOTH_SPEED * dt);
 
         const currentPhase = phaseRef.current;
         const ret = reticleRef.current;
@@ -398,14 +432,20 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               if (intensity) {
                 const lum = Math.max(intensity.x, intensity.y, intensity.z);
                 if (ambientRef.current) {
-                  ambientRef.current.intensity = Math.min(lum * 0.6, 2.5);
+                  // Smooth light changes to avoid flickering
+                  const targetAmbient = Math.min(lum * 0.6, 2.5);
+                  ambientRef.current.intensity += (targetAmbient - ambientRef.current.intensity) * lerpAlpha * 0.3;
                 }
                 if (dirLightRef.current) {
-                  dirLightRef.current.intensity = Math.min(lum * 0.8, 3.0);
-                  dirLightRef.current.color.setRGB(
-                    intensity.x / (lum || 1),
-                    intensity.y / (lum || 1),
-                    intensity.z / (lum || 1)
+                  const targetDir = Math.min(lum * 0.8, 3.0);
+                  dirLightRef.current.intensity += (targetDir - dirLightRef.current.intensity) * lerpAlpha * 0.3;
+                  dirLightRef.current.color.lerp(
+                    new THREE.Color(
+                      intensity.x / (lum || 1),
+                      intensity.y / (lum || 1),
+                      intensity.z / (lum || 1)
+                    ),
+                    lerpAlpha * 0.3
                   );
                 }
               }
@@ -423,6 +463,24 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
           }
         }
 
+        // ── Update model from anchor (drift correction) ──
+        if (currentPhase === 'placed' && anchorRef.current && mg) {
+          try {
+            const anchorPose = frame.getPose(anchorRef.current.anchorSpace, localSpace);
+            if (anchorPose) {
+              const aPos = anchorPose.transform.position;
+              // Smoothly correct any drift between anchor and placed position
+              placedPosRef.current.x += (aPos.x - placedPosRef.current.x) * lerpAlpha;
+              placedPosRef.current.z += (aPos.z - placedPosRef.current.z) * lerpAlpha;
+              // Don't correct Y from anchor — user controls height
+              mg.position.x = placedPosRef.current.x;
+              mg.position.z = placedPosRef.current.z;
+            }
+          } catch {
+            // Anchor pose unavailable this frame — no correction
+          }
+        }
+
         // ── Hit-test: scanning or placed (for repositioning) ──
         if (currentPhase === 'scanning' || currentPhase === 'placed') {
           const hts = hitTestSourceRef.current;
@@ -434,50 +492,76 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               const pose = hit.getPose(localSpaceRef.current);
 
               if (pose) {
-                const now = performance.now();
                 lastHitTime.current = now;
                 consecutiveHits.current++;
                 surfaceConfidence.current = Math.min(1, consecutiveHits.current / 15);
 
                 // Extract position + rotation from hit pose
                 const m4 = new THREE.Matrix4().fromArray(pose.transform.matrix);
-                const targetPos = new THREE.Vector3();
-                const targetQuat = new THREE.Quaternion();
-                const targetScale = new THREE.Vector3();
-                m4.decompose(targetPos, targetQuat, targetScale);
+                const rawPos = new THREE.Vector3();
+                const rawQuat = new THREE.Quaternion();
+                const rawScale = new THREE.Vector3();
+                m4.decompose(rawPos, rawQuat, rawScale);
 
-                reticlePosTarget.current.copy(targetPos);
-                reticleQuatTarget.current.copy(targetQuat);
+                // ── Outlier rejection: median filter on rolling buffer ──
+                const posBuf = hitPosBuffer.current;
+                const quatBuf = hitQuatBuffer.current;
+                posBuf.push(rawPos.clone());
+                quatBuf.push(rawQuat.clone());
+                if (posBuf.length > HIT_BUFFER_SIZE) posBuf.shift();
+                if (quatBuf.length > HIT_BUFFER_SIZE) quatBuf.shift();
+
+                let filteredPos = rawPos;
+                let filteredQuat = rawQuat;
+
+                if (posBuf.length >= 3) {
+                  // Median of each axis independently (rejects single-frame spikes)
+                  const medX = median(posBuf.map(p => p.x));
+                  const medY = median(posBuf.map(p => p.y));
+                  const medZ = median(posBuf.map(p => p.z));
+                  filteredPos = new THREE.Vector3(medX, medY, medZ);
+
+                  // For quaternion: use the buffer entry closest to the median position
+                  // (pure median of quaternion components isn't valid)
+                  let bestIdx = 0;
+                  let bestDist = Infinity;
+                  for (let i = 0; i < posBuf.length; i++) {
+                    const d = posBuf[i].distanceToSquared(filteredPos);
+                    if (d < bestDist) { bestDist = d; bestIdx = i; }
+                  }
+                  filteredQuat = quatBuf[bestIdx];
+                }
+
+                reticlePosTarget.current.copy(filteredPos);
+                reticleQuatTarget.current.copy(filteredQuat);
 
                 // First hit: snap immediately
                 if (!reticleHasFirstPose.current) {
-                  reticlePosSmoothed.current.copy(targetPos);
-                  reticleQuatSmoothed.current.copy(targetQuat);
+                  reticlePosSmoothed.current.copy(filteredPos);
+                  reticleQuatSmoothed.current.copy(filteredQuat);
                   reticleHasFirstPose.current = true;
                 } else {
-                  // Lerp for smooth, stable movement
-                  reticlePosSmoothed.current.lerp(reticlePosTarget.current, LERP_FACTOR);
-                  reticleQuatSmoothed.current.slerp(reticleQuatTarget.current, LERP_FACTOR);
+                  // Frame-rate independent lerp
+                  reticlePosSmoothed.current.lerp(reticlePosTarget.current, lerpAlpha);
+                  reticleQuatSmoothed.current.slerp(reticleQuatTarget.current, lerpAlpha);
                 }
 
                 // Apply smoothed transform
                 ret.position.copy(reticlePosSmoothed.current);
                 ret.quaternion.copy(reticleQuatSmoothed.current);
 
-                // Show reticle — during scanning always, during placed only if user is looking at new surface
+                // Show reticle
                 if (currentPhase === 'scanning') {
                   ret.visible = true;
                 } else if (currentPhase === 'placed') {
-                  // Show ghost reticle so user can tap to reposition
                   ret.visible = true;
-                  // Dim the reticle in placed mode
                   ret.children.forEach(c => {
                     if (c.material) c.material.opacity = 0.3;
                   });
                 }
 
                 // Surface type detection from normal
-                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(targetQuat);
+                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(filteredQuat);
                 if (Math.abs(up.y) > 0.7) {
                   setSurfaceInfo(up.y > 0 ? 'Floor detected — tap to place' : 'Ceiling detected — tap to place');
                 } else {
@@ -490,16 +574,15 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
               consecutiveHits.current = 0;
               surfaceConfidence.current = 0;
 
-              // Don't hide reticle immediately — keep showing for 300ms to avoid flicker
-              if (performance.now() - lastHitTime.current > 300) {
+              // Don't hide reticle immediately — 300ms grace period
+              if (now - lastHitTime.current > 300) {
                 if (currentPhase === 'scanning') {
                   ret.visible = false;
                 }
                 setSurfaceInfo('Scanning for surfaces...');
               }
 
-              // If no hits for 3 seconds, mark tracking as limited
-              if (performance.now() - lastHitTime.current > 3000) {
+              if (now - lastHitTime.current > 3000) {
                 setTrackingStatus('limited');
               }
             }
@@ -508,15 +591,14 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
 
         // ── Pulsing reticle animation (scale by confidence) ──
         if (ret && ret.visible && currentPhase === 'scanning') {
-          const t = performance.now() * 0.003;
+          const t = now * 0.003;
           const confidence = surfaceConfidence.current;
-          const baseScale = 0.8 + confidence * 0.2; // bigger when confident
+          const baseScale = 0.8 + confidence * 0.2;
           const pulse = baseScale + 0.15 * Math.sin(t);
           ret.scale.set(pulse, pulse, pulse);
-          // Restore full opacity in scanning mode
           ret.children.forEach(c => {
             if (c.material && c.material.opacity !== undefined) {
-              if (c === ret.children[1]) c.material.opacity = 0.4; // inner ring
+              if (c === ret.children[1]) c.material.opacity = 0.4;
               else c.material.opacity = 1;
             }
           });
@@ -529,7 +611,6 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
           mg.rotation.y = (rotationRef.current * Math.PI) / 180;
           mg.position.y = placedPosRef.current.y + heightRef.current;
 
-          // Keep shadow plane at model base
           if (shadowPlaneRef.current) {
             shadowPlaneRef.current.position.y = placedPosRef.current.y;
           }
@@ -549,7 +630,7 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
   }, [onClose, updatePhase]);
 
   // ── Place (or reposition) model at current reticle position ──
-  const placeModelAtReticle = useCallback(() => {
+  const placeModelAtReticle = useCallback((xrFrame) => {
     const mg = modelGroupRef.current;
     const ret = reticleRef.current;
     if (!mg || !ret) return;
@@ -575,6 +656,32 @@ const CustomAR = ({ modelSrc, modelCategory, onClose }) => {
     ret.children.forEach(c => {
       if (c.material) c.material.opacity = 0.3;
     });
+
+    // ── Create XR anchor for drift-proof placement ──
+    if (anchorRef.current) {
+      try { anchorRef.current.delete(); } catch {}
+      anchorRef.current = null;
+    }
+
+    if (xrFrame && xrFrame.createAnchor && localSpaceRef.current) {
+      try {
+        const anchorPose = new XRRigidTransform(
+          { x: pos.x, y: pos.y, z: pos.z, w: 1 },
+          { x: reticleQuatSmoothed.current.x, y: reticleQuatSmoothed.current.y, z: reticleQuatSmoothed.current.z, w: reticleQuatSmoothed.current.w }
+        );
+        xrFrame.createAnchor(anchorPose, localSpaceRef.current).then(anchor => {
+          anchorRef.current = anchor;
+        }).catch(() => {
+          // Anchors not supported — model works fine, just no drift correction
+        });
+      } catch {
+        // Anchors not available — graceful degradation
+      }
+    }
+
+    // Clear hit buffer for fresh data if user repositions
+    hitPosBuffer.current = [];
+    hitQuatBuffer.current = [];
 
     updatePhase('placed');
   }, [updatePhase]);
