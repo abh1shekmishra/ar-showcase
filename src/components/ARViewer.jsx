@@ -304,6 +304,8 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
         ref={modelViewerRef}
         src={modelSrc}
         alt="3D Model"
+        ar
+        ar-modes="scene-viewer quick-look"
         camera-controls
         touch-action="pan-y"
         shadow-intensity="2"
@@ -343,7 +345,21 @@ const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) =
       {modelLoaded && (
         <button
           className="ar-launch-btn"
-          onClick={() => setShowCustomAR(true)}
+          onClick={() => {
+            const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+            if (isIOS) {
+              // iOS: use model-viewer's Quick Look fallback
+              const mv = modelViewerRef.current;
+              if (mv && mv.canActivateAR) {
+                mv.activateAR();
+              } else {
+                setError('AR Quick Look requires Safari on iOS. Open this page in Safari.');
+              }
+            } else {
+              // Android/Desktop: use custom WebXR AR
+              setShowCustomAR(true);
+            }
+          }}
         >
           <svg width="22" height="22" viewBox="0 0 24 24" fill="white">
             <path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zm0-5C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z"/>
