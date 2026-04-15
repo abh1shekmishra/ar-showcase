@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import '@google/model-viewer';
 import './ARViewer.css';
 
-const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
+const ARViewer = ({ modelSrc, modelCategory, showControls, onToggleControls }) => {
   const modelViewerRef = useRef(null);
   const [scale, setScale] = useState(1);
   const [rotationY, setRotationY] = useState(0);
@@ -19,6 +19,20 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
   const [skyboxImage, setSkyboxImage] = useState('');
   const preARScaleRef = useRef(1);
   const preARRotationRef = useRef(0);
+
+  // AR fine-tuning controls
+  const [arScale, setArScale] = useState(1);
+  const [arRotation, setArRotation] = useState(0);
+  const [arHeight, setArHeight] = useState(0); // vertical offset in meters
+  const [showArControls, setShowArControls] = useState(false);
+
+  // Determine placement type from category
+  const isCeiling = modelCategory === 'Ceiling Lamps' || modelCategory === 'Chandeliers';
+  const isWall = modelCategory === 'Wall Lights';
+  const arPlacement = isWall ? 'wall' : 'floor';
+
+  // Default ceiling height (meters) — user can adjust
+  const DEFAULT_CEILING_HEIGHT = 2.5;
 
   const environments = [
     { value: 'neutral', label: '⬜ Blank', exposure: 1, skybox: '' },
@@ -226,27 +240,36 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         console.log('AR Status:', status);
         
         if (status === 'session-started') {
-          addDebugMessage('🎯 AR session started! Scanning for surfaces...', 'success');
-          addDebugMessage('� Real-world scale locked — model at true size', 'info');
+          addDebugMessage('AR session started!', 'success');
           setIsInAR(true);
+          setShowArControls(true);
           
-          // Save current preview scale/rotation and reset for AR
-          // AR should use the model's authored dimensions (ar-scale="fixed")
+          // Save current preview state
           preARScaleRef.current = scale;
           preARRotationRef.current = rotationY;
           
-          // Reset model-viewer scale to 1 so AR uses real dimensions
+          // Reset AR fine-tuning
+          setArScale(1);
+          setArRotation(0);
+          setArHeight(isCeiling ? DEFAULT_CEILING_HEIGHT : 0);
+          
           if (modelViewer) {
-            modelViewer.scale = '1 1 1';
-            modelViewer.orientation = '0deg 0deg 0deg';
+            if (isCeiling) {
+              // Flip upside down so fixture hangs from ceiling
+              modelViewer.orientation = '180deg 0deg 0deg';
+            } else {
+              modelViewer.scale = '1 1 1';
+              modelViewer.orientation = '0deg 0deg 0deg';
+            }
           }
         } else if (status === 'object-placed') {
-          addDebugMessage('✅ Model placed! Anchored to surface.', 'success');
+          addDebugMessage('Placed! Use controls to fine-tune.', 'success');
         } else if (status === 'not-presenting') {
           addDebugMessage('AR session ended', 'info');
           setIsInAR(false);
+          setShowArControls(false);
           
-          // Restore preview scale/rotation after AR
+          // Restore preview scale/rotation
           if (modelViewer) {
             const s = preARScaleRef.current;
             modelViewer.scale = `${s} ${s} ${s}`;
@@ -255,12 +278,13 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         } else if (status === 'failed') {
           const errorMsg = 'AR failed. Model may be too large or incompatible.';
           setError(errorMsg);
-          addDebugMessage(`❌ ${errorMsg}`, 'error');
-          addDebugMessage('🔧 Troubleshooting:', 'warning');
+          addDebugMessage(errorMsg, 'error');
+          addDebugMessage('Troubleshooting:', 'warning');
           addDebugMessage('- Ensure adequate lighting', 'warning');
           addDebugMessage('- Try a different flat surface', 'warning');
           addDebugMessage('- Move camera slowly and deliberately', 'warning');
           setIsInAR(false);
+          setShowArControls(false);
           
           if (isIOS) {
             addDebugMessage('iOS: Try smaller model (<10MB)', 'warning');
@@ -311,6 +335,23 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
       modelViewer.orientation = `0deg ${rotationY}deg 0deg`;
     }
   }, [rotationY, modelLoaded]);
+
+  // Apply AR fine-tuning controls during AR session
+  useEffect(() => {
+    const modelViewer = modelViewerRef.current;
+    if (modelViewer && isInAR) {
+      // Apply AR scale
+      const s = arScale;
+      modelViewer.scale = `${s} ${s} ${s}`;
+      
+      // Apply AR rotation + ceiling flip
+      if (isCeiling) {
+        modelViewer.orientation = `180deg ${arRotation}deg 0deg`;
+      } else {
+        modelViewer.orientation = `0deg ${arRotation}deg 0deg`;
+      }
+    }
+  }, [arScale, arRotation, arHeight, isInAR, isCeiling]);
 
   const handleScaleChange = (newScale) => {
     setScale(Math.max(0.1, Math.min(5, newScale)));
@@ -370,7 +411,7 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         alt="3D Model"
         ar
         ar-modes="webxr scene-viewer quick-look"
-        ar-placement="floor"
+        ar-placement={arPlacement}
         ar-scale="fixed"
         camera-controls
         touch-action="pan-y"
@@ -410,6 +451,91 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
         <div id="ar-failure">
           AR is not tracking!<br/>
           Move slowly and ensure good lighting.
+        </div>
+
+        {/* AR Fine-Tuning Controls — visible during AR session */}
+        <div id="ar-controls" className={`ar-controls ${showArControls ? 'visible' : ''}`}>
+          <div className="ar-controls-header">
+            <span className="ar-controls-title">
+              {isCeiling ? '💡 Ceiling Fixture' : isWall ? '🔲 Wall Light' : '🔧 Adjust'}
+            </span>
+            <button 
+              className="ar-controls-toggle"
+              onClick={() => setShowArControls(prev => !prev)}
+            >
+              ▼
+            </button>
+          </div>
+          
+          {/* Height control — especially important for ceiling fixtures */}
+          {isCeiling && (
+            <div className="ar-control-row">
+              <label>Height</label>
+              <div className="ar-slider-row">
+                <button onClick={() => setArHeight(h => Math.max(0, h - 0.1))}>−</button>
+                <input
+                  type="range"
+                  min="0"
+                  max="4"
+                  step="0.05"
+                  value={arHeight}
+                  onChange={(e) => setArHeight(parseFloat(e.target.value))}
+                />
+                <button onClick={() => setArHeight(h => Math.min(4, h + 0.1))}>+</button>
+              </div>
+              <span className="ar-value">{arHeight.toFixed(1)}m</span>
+            </div>
+          )}
+
+          {/* Scale control */}
+          <div className="ar-control-row">
+            <label>Scale</label>
+            <div className="ar-slider-row">
+              <button onClick={() => setArScale(s => Math.max(0.2, s - 0.1))}>−</button>
+              <input
+                type="range"
+                min="0.2"
+                max="3"
+                step="0.05"
+                value={arScale}
+                onChange={(e) => setArScale(parseFloat(e.target.value))}
+              />
+              <button onClick={() => setArScale(s => Math.min(3, s + 0.1))}>+</button>
+            </div>
+            <span className="ar-value">{arScale.toFixed(1)}x</span>
+          </div>
+
+          {/* Rotation control */}
+          <div className="ar-control-row">
+            <label>Rotate</label>
+            <div className="ar-slider-row">
+              <button onClick={() => setArRotation(r => r - 15)}>↺</button>
+              <input
+                type="range"
+                min="0"
+                max="360"
+                step="5"
+                value={arRotation % 360}
+                onChange={(e) => setArRotation(parseInt(e.target.value))}
+              />
+              <button onClick={() => setArRotation(r => r + 15)}>↻</button>
+            </div>
+            <span className="ar-value">{arRotation % 360}°</span>
+          </div>
+
+          {/* Quick actions */}
+          <div className="ar-quick-actions">
+            <button onClick={() => { setArScale(1); setArRotation(0); setArHeight(isCeiling ? DEFAULT_CEILING_HEIGHT : 0); }}>
+              Reset
+            </button>
+            {isCeiling && (
+              <>
+                <button onClick={() => setArHeight(2.4)}>2.4m</button>
+                <button onClick={() => setArHeight(2.7)}>2.7m</button>
+                <button onClick={() => setArHeight(3.0)}>3.0m</button>
+              </>
+            )}
+          </div>
         </div>
 
         {/* Loading Indicator */}
@@ -585,26 +711,9 @@ const ARViewer = ({ modelSrc, showControls, onToggleControls }) => {
           <ul>
             <li><strong>Desktop:</strong> Click and drag to rotate • Scroll to zoom • Right-click to pan</li>
             <li><strong>Mobile:</strong> Tap "View in AR" to place model in your space</li>
-            <li><strong>AR Placement:</strong> Works on floor, walls, and ceiling</li>
-            <li><strong>AR Accuracy Tips:</strong></li>
-            <ul style={{ marginLeft: '20px', marginTop: '5px' }}>
-              <li>✓ Move camera slowly for stable detection</li>
-              <li>✓ Ensure good lighting on the target surface</li>
-              <li>✓ Look for green gridlines (surface detected)</li>
-              <li>✓ Tap to place only when surface is clearly detected</li>
-              <li>✓ For ceiling: start from floor angle and slowly tilt up</li>
-            </ul>
-            <li><strong>AR Controls:</strong></li>
-            <ul style={{ marginLeft: '20px', marginTop: '5px' }}>
-              <li>1 finger drag = Move model</li>
-              <li>2 fingers rotate = Rotate model</li>
-              <li>2 fingers pinch = Scale model up/down</li>
-            </ul>
-            <li><strong>AR Screenshot:</strong></li>
-            <ul style={{ marginLeft: '20px', marginTop: '5px' }}>
-              <li>Android: Look for camera/share button in Scene Viewer</li>
-              <li>iOS: Press Side Button + Volume Up (device screenshot)</li>
-            </ul>
+            <li><strong>AR Placement:</strong> Floor (default), Wall (wall lights), Ceiling (inverted for fixtures)</li>
+            <li><strong>AR Controls:</strong> Use the overlay panel to fine-tune height, scale, and rotation</li>
+            <li><strong>Ceiling fixtures:</strong> Model flips automatically — use height slider to set distance from ceiling</li>
           </ul>
         </div>
       )}

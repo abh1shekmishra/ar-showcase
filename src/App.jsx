@@ -6,22 +6,26 @@ import './App.css'
 
 function App() {
   const [modelSrc, setModelSrc] = useState(null)
+  const [modelCategory, setModelCategory] = useState(null)
   const [showControls, setShowControls] = useState(true)
   const [modelLibrary, setModelLibrary] = useState([])
 
-  const handleModelLoad = (url, name = 'Model') => {
+  const handleModelLoad = (url, name = 'Model', category = null) => {
     const newModel = {
       id: Date.now(),
       url,
       name,
+      category,
       timestamp: new Date().toISOString()
     }
     setModelLibrary(prev => [...prev, newModel])  
     setModelSrc(url)
+    setModelCategory(category)
   }
 
   const handleSelectModel = (model) => {
     setModelSrc(model.url)
+    setModelCategory(model.category || null)
   }
 
   const handleDeleteModel = (id) => {
@@ -109,8 +113,7 @@ function App() {
               )}
 
               <ARViewer 
-                modelSrc={modelSrc} 
-                showControls={showControls}
+                modelSrc={modelSrc}                 modelCategory={modelCategory}                showControls={showControls}
                 onToggleControls={() => setShowControls(!showControls)}
               />
             </div>

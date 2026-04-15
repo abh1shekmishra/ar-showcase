@@ -60,7 +60,7 @@ const ModelGallery = ({ onSelect }) => {
   }, []);
 
   /* ───── click handler: download → extract → load ───── */
-  const handleModelClick = async (item) => {
+  const handleModelClick = async (item, category) => {
     if (activeUid) return;
 
     if (!SKETCHFAB_TOKEN) {
@@ -172,7 +172,7 @@ const ModelGallery = ({ onSelect }) => {
         setProgress(100);
         await tick();
 
-        onSelect(URL.createObjectURL(blob), item.name || glbFile);
+        onSelect(URL.createObjectURL(blob), item.name || glbFile, category);
       } else {
         setStatusText('Parsing scene graph…');
         setProgress(95);
@@ -215,7 +215,7 @@ const ModelGallery = ({ onSelect }) => {
         setProgress(100);
         await tick();
 
-        onSelect(URL.createObjectURL(gltfBlob), item.name || gltfFile);
+        onSelect(URL.createObjectURL(gltfBlob), item.name || gltfFile, category);
       }
 
       // brief flash of 100% before viewer takes over
@@ -276,7 +276,7 @@ const ModelGallery = ({ onSelect }) => {
                 <button
                   key={item.uid}
                   className={`model-card${isActive ? ' downloading' : ''}${isBusy && !isActive ? ' dimmed' : ''}`}
-                  onClick={() => handleModelClick(item)}
+                  onClick={() => handleModelClick(item, group.category)}
                   title={isActive ? statusText : `Load ${item.name}`}
                   disabled={isBusy}
                 >
